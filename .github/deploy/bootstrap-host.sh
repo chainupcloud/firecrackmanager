@@ -143,7 +143,7 @@ if [[ ! -c /dev/kvm ]]; then
   exit 1
 fi
 
-# 新宿主机只补齐明确依赖；不在这里做应用发布，发布复用 deploy.sh。
+# 新宿主机只补齐明确依赖；应用发布复用 deploy.sh，保证重复执行幂等。
 install_packages ca-certificates curl gzip iptables jq tar
 need_cmd curl
 need_cmd iptables
