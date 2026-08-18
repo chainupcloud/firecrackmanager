@@ -562,6 +562,143 @@ func (wc *WebConsole) baseTemplate(title, page, content string, session *databas
             document.getElementById(id).classList.remove('active');
         }
 
+        // 写操作成功后刷新当前页面，避免用户手动点刷新确认结果。
+        let pendingViewRefresh = null;
+
+        function isReadOnlyPost(url) {
+            return [
+                '/api/registry/search',
+                '/api/compose/services',
+                '/api/system/proxy/test',
+                '/api/system/ldap/test'
+            ].some(prefix => url.startsWith(prefix));
+        }
+
+        function callIfExists(name, ...args) {
+            const fn = window[name];
+            if (typeof fn !== 'function') return;
+            try {
+                const result = fn(...args);
+                if (result && typeof result.catch === 'function') {
+                    result.catch(err => console.error(name + ' failed:', err));
+                }
+            } catch (err) {
+                console.error(name + ' failed:', err);
+            }
+        }
+
+        function refreshCurrentView(triggerUrl = '') {
+            const path = window.location.pathname;
+
+            if (path === '/' || path === '/dashboard') {
+                callIfExists('loadDashboard');
+                return;
+            }
+
+            if (path === '/vms') {
+                callIfExists('loadVMs', true);
+                callIfExists('loadVMGroupedView');
+                callIfExists('loadSearchFilters');
+                return;
+            }
+
+            if (path.startsWith('/vms/')) {
+                callIfExists('loadVMDetails');
+                callIfExists('loadVMMetrics');
+                callIfExists('loadMemoryHotplugStatus');
+                return;
+            }
+
+            if (path === '/networks') {
+                callIfExists('loadNetworks');
+                callIfExists('loadInterfaces');
+                if (window.currentNetworkId) {
+                    callIfExists('loadNetworkVMs', window.currentNetworkId);
+                    callIfExists('loadFirewallRules', window.currentNetworkId);
+                }
+                return;
+            }
+
+            if (path === '/images') {
+                callIfExists('loadKernels');
+                callIfExists('loadRootfs');
+                callIfExists('loadBuilderDir');
+                return;
+            }
+
+            if (path === '/docker') {
+                callIfExists('loadJobs');
+                return;
+            }
+
+            if (path === '/settings') {
+                callIfExists('loadSystemStatus');
+                callIfExists('loadJailerConfig');
+                callIfExists('loadProxyConfig');
+                callIfExists('loadLDAPConfig');
+                callIfExists('loadLDAPGroupMappings');
+                callIfExists('loadInstalledKernels');
+                return;
+            }
+
+            if (path === '/users') {
+                callIfExists('loadUsers');
+                return;
+            }
+
+            if (path === '/groups') {
+                callIfExists('loadGroups');
+                return;
+            }
+
+            if (path === '/migration') {
+                callIfExists('loadServerStatus');
+                callIfExists('loadKeys');
+                callIfExists('loadVMs');
+                return;
+            }
+
+            if (path === '/hostnetwork') {
+                callIfExists('loadInterfaces');
+                callIfExists('loadDNS');
+                callIfExists('loadRoutes');
+                return;
+            }
+
+            if (path === '/vmgroups') {
+                callIfExists('loadVMGroups');
+                if (window.currentGroupId) {
+                    callIfExists('loadGroupVMs');
+                    callIfExists('loadGroupPermissions');
+                }
+                return;
+            }
+
+            if (path === '/account') {
+                callIfExists('loadAccountData');
+                return;
+            }
+
+            if (path === '/appliances') {
+                callIfExists('loadAppliances');
+                const privFilename = document.getElementById('privFilename')?.value;
+                if (privFilename) callIfExists('loadPrivileges', privFilename);
+                return;
+            }
+
+            if (path === '/store') {
+                callIfExists('loadStore');
+            }
+        }
+
+        function scheduleCurrentViewRefresh(triggerUrl = '', delay = 250) {
+            if (pendingViewRefresh) clearTimeout(pendingViewRefresh);
+            pendingViewRefresh = setTimeout(() => {
+                pendingViewRefresh = null;
+                refreshCurrentView(triggerUrl);
+            }, delay);
+        }
+
         // API helper
         async function apiCall(url, method = 'GET', body = null) {
             const options = {
@@ -570,7 +707,12 @@ func (wc *WebConsole) baseTemplate(title, page, content string, session *databas
             };
             if (body) options.body = JSON.stringify(body);
             const resp = await fetch(url, options);
-            return { ok: resp.ok, data: await resp.json() };
+            const data = await resp.json();
+            const normalizedMethod = method.toUpperCase();
+            if (resp.ok && normalizedMethod !== 'GET' && !isReadOnlyPost(url)) {
+                scheduleCurrentViewRefresh(url);
+            }
+            return { ok: resp.ok, data };
         }
 
         // Format bytes
@@ -3007,6 +3149,7 @@ async function submitImportVM(event) {
                 const data = JSON.parse(xhr.responseText);
                 closeModal('importVMModal');
                 loadVMs();
+                scheduleCurrentViewRefresh('/api/vms/import');
                 alert('VM imported successfully!');
             } else {
                 let msg = 'Failed to import VM';
@@ -5243,6 +5386,7 @@ func (wc *WebConsole) renderNetworksPage() string {
 
 <script>
 let currentNetworkId = null;
+window.currentNetworkId = currentNetworkId;
 let networkVMs = [];
 let editingFirewallRuleId = null;
 
@@ -5329,6 +5473,7 @@ async function createNetwork() {
 
 async function openNetworkDetails(id) {
     currentNetworkId = id;
+    window.currentNetworkId = id;
     const { ok, data: net } = await apiCall('/api/networks/' + id);
     if (!ok) return;
 
@@ -6468,6 +6613,7 @@ async function uploadRootfs() {
                     document.getElementById('uploadRootfsForm').reset();
                     progressDiv.style.display = 'none';
                     loadRootfs();
+                    scheduleCurrentViewRefresh('/api/rootfs/upload');
                 }, 1000);
             } else {
                 progressDiv.style.display = 'none';
@@ -6564,6 +6710,7 @@ async function installQemuUtils() {
             alert('qemu-utils installed successfully!\\n\\n' + (data.version || ''));
             // Refresh status
             await checkQemuUtilsStatus();
+            scheduleCurrentViewRefresh('/api/system/qemu-utils/install');
             // Open the modal now
             openModal('convertQemuModal');
         } else {
@@ -6711,6 +6858,7 @@ function pollQemuConversionProgress() {
                 setTimeout(() => {
                     closeQemuConvertModal();
                     loadRootfs();
+                    scheduleCurrentViewRefresh('/api/rootfs/convert-qemu');
                 }, 1500);
             } else if (data.status === 'failed') {
                 clearInterval(qemuConversionPollInterval);
@@ -11252,6 +11400,7 @@ let vmGroups = [];
 let allVMs = [];
 let allUserGroups = [];
 let currentGroupId = null;
+window.currentGroupId = currentGroupId;
 
 async function loadVMGroups() {
     const { ok, data } = await apiCall('/api/vmgroups');
@@ -11319,6 +11468,7 @@ async function createVMGroup(e) {
 
 async function editVMGroup(id) {
     currentGroupId = id;
+    window.currentGroupId = id;
 
     // Load group details
     const { ok, data } = await apiCall('/api/vmgroups/' + id);
@@ -12264,6 +12414,7 @@ async function deleteApplianceWithProgress(filename, vmName) {
             progressBar.style.width = '0%';
             progressBar.style.background = 'var(--danger)';
             loadAppliances();
+            scheduleCurrentViewRefresh('/api/appliances/' + encodeURIComponent(filename));
         }, 1500);
 
     } catch (error) {
@@ -12526,6 +12677,7 @@ function pollRestoreProgress(progressKey, vmName) {
             if (progress.status === 'completed') {
                 clearInterval(restoreProgressInterval);
                 restoreProgressInterval = null;
+                scheduleCurrentViewRefresh('/api/appliances/restore');
 
                 // Show success
                 document.getElementById('restoreProgress').innerHTML = ` + "`" + `
@@ -12564,6 +12716,7 @@ async function deleteAppliance(filename) {
 
         if (response.ok) {
             loadAppliances();
+            scheduleCurrentViewRefresh('/api/appliances/' + encodeURIComponent(filename));
         } else {
             alert(data.error || 'Failed to delete appliance');
         }
@@ -12680,6 +12833,7 @@ async function addPrivilege() {
         if (response.ok) {
             document.getElementById('privTarget').value = '';
             await loadPrivileges(filename);
+            scheduleCurrentViewRefresh('/api/appliances/' + encodeURIComponent(filename) + '/privileges');
         } else {
             alert(data.error || 'Failed to add privilege');
         }
@@ -12704,6 +12858,7 @@ async function removePrivilege(type, id) {
 
         if (response.ok) {
             await loadPrivileges(filename);
+            scheduleCurrentViewRefresh('/api/appliances/' + encodeURIComponent(filename) + '/privileges/' + type + '/' + id);
         } else {
             alert(data.error || 'Failed to remove privilege');
         }
@@ -13032,6 +13187,7 @@ async function pollProgress(name, key) {
             }
             // Optionally redirect to appliances page or show success message
             showNotification('Download completed: ' + name, 'success');
+            scheduleCurrentViewRefresh('/api/store/download/' + encodeURIComponent(name));
         } else if (data.status === 'error') {
             // Download failed
             delete activeDownloads[name];
@@ -13092,6 +13248,7 @@ async function refreshCatalog() {
 
         // Reload after a short delay to allow refresh to complete
         setTimeout(loadStore, 2000);
+        scheduleCurrentViewRefresh('/api/store/refresh', 2200);
 
     } catch (error) {
         alert('Failed to refresh catalog: ' + error.message);
