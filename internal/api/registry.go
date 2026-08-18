@@ -954,11 +954,6 @@ func (s *Server) handleRootFSExtend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.NewSizeMB > 102400 { // 100 GB max
-		s.jsonError(w, "New size cannot exceed 100 GB", http.StatusBadRequest)
-		return
-	}
-
 	// Get rootfs info
 	rootfs, err := s.db.GetRootFS(rootfsID)
 	if err != nil {
