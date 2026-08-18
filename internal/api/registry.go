@@ -1040,7 +1040,6 @@ func (s *Server) handleBuildDebianImage(w http.ResponseWriter, r *http.Request) 
 		ImageName     string `json:"image_name"`
 		DebianVersion string `json:"debian_version"`
 		DiskSizeMB    int    `json:"disk_size_mb"`
-		BuilderDir    string `json:"builder_dir"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1083,11 +1082,8 @@ func (s *Server) handleBuildDebianImage(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Set builder directory (use server config if not specified in request)
+	// 构建目录只使用服务端配置，避免请求覆盖后清理到非预期目录。
 	builderDir := s.GetBuilderDir()
-	if req.BuilderDir != "" {
-		builderDir = req.BuilderDir
-	}
 
 	// Check if image already exists
 	rootfsDir := s.kernelMgr.GetRootFSDir()
@@ -1193,7 +1189,7 @@ func (s *Server) runDebianBuild(job *DebianBuildJob, builderDir, rootfsDir strin
 	job.Status = "running"
 	debianBuildJobsMu.Unlock()
 
-	workDir := filepath.Join(builderDir, job.ImageName)
+	workDir := filepath.Join(builderDir, "job-"+job.ID)
 	rootfsPath := filepath.Join(workDir, "rootfs")
 	imagePath := filepath.Join(workDir, job.ImageName+".ext4")
 	mountPath := filepath.Join(workDir, "mnt")

@@ -818,12 +818,10 @@ func (s *Server) handleVMs(w http.ResponseWriter, r *http.Request) {
 			vmObj.MacAddress = network.GenerateMAC(vmID)
 
 			// Allocate IP
-			existingVMs, _ := s.db.GetVMsByNetwork(req.NetworkID)
-			usedIPs := make([]string, 0, len(existingVMs))
-			for _, v := range existingVMs {
-				if v.IPAddress != "" {
-					usedIPs = append(usedIPs, v.IPAddress)
-				}
+			usedIPs, err := s.usedIPsForNetwork(req.NetworkID, "")
+			if err != nil {
+				s.jsonError(w, "Failed to list network IPs: "+err.Error(), http.StatusInternalServerError)
+				return
 			}
 			ip, err := network.AllocateIP(net.Subnet, net.Gateway, usedIPs)
 			if err != nil {
@@ -1945,12 +1943,10 @@ func (s *Server) handleVM(w http.ResponseWriter, r *http.Request) {
 						vmObj.MacAddress = network.GenerateMAC(vmID)
 
 						// Allocate IP
-						existingVMs, _ := s.db.GetVMsByNetwork(newNetworkID)
-						usedIPs := make([]string, 0, len(existingVMs))
-						for _, v := range existingVMs {
-							if v.IPAddress != "" && v.ID != vmID {
-								usedIPs = append(usedIPs, v.IPAddress)
-							}
+						usedIPs, err := s.usedIPsForNetwork(newNetworkID, vmID)
+						if err != nil {
+							s.jsonError(w, "Failed to list network IPs: "+err.Error(), http.StatusInternalServerError)
+							return
 						}
 						ip, err := network.AllocateIP(net.Subnet, net.Gateway, usedIPs)
 						if err != nil {
@@ -5989,6 +5985,36 @@ func sanitizeRootFSFileComponent(value string) string {
 		return "vm"
 	}
 	return result
+}
+
+func (s *Server) usedIPsForNetwork(networkID, excludeVMID string) ([]string, error) {
+	existingVMs, err := s.db.GetVMsByNetwork(networkID)
+	if err != nil {
+		return nil, err
+	}
+
+	usedIPs := make([]string, 0, len(existingVMs))
+	for _, v := range existingVMs {
+		if v.ID == excludeVMID {
+			continue
+		}
+		ip := normalizeVMIPAddress(v.IPAddress)
+		if ip != "" {
+			usedIPs = append(usedIPs, ip)
+		}
+	}
+	return usedIPs, nil
+}
+
+func normalizeVMIPAddress(ipAddress string) string {
+	ipAddress = strings.TrimSpace(ipAddress)
+	if ipAddress == "" {
+		return ""
+	}
+	if ip, _, found := strings.Cut(ipAddress, "/"); found {
+		return strings.TrimSpace(ip)
+	}
+	return ipAddress
 }
 
 // CleanupSessions periodically removes expired sessions

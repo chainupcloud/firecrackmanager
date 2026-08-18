@@ -6079,8 +6079,8 @@ func (wc *WebConsole) renderImagesPage() string {
                 </div>
                 <div class="form-group">
                     <label>Builder Directory</label>
-                    <input type="text" id="debianBuilderDir" value="/home/Builder" placeholder="/home/Builder">
-                    <small style="color: var(--text-secondary);">Temporary working directory for build process</small>
+                    <input type="text" id="debianBuilderDir" value="/home/Builder" readonly>
+                    <small style="color: var(--text-secondary);">Configured by the server</small>
                 </div>
             </form>
             <div id="debianBuildProgress" style="display: none; margin-top: 20px;">
@@ -6945,7 +6945,6 @@ async function startDebianBuild() {
     const version = document.getElementById('debianVersion').value;
     const imageName = document.getElementById('debianImageName').value.trim();
     const diskSize = parseInt(document.getElementById('debianDiskSize').value);
-    const builderDir = document.getElementById('debianBuilderDir').value.trim();
 
     if (!imageName) {
         alert('Please enter an image name');
@@ -6972,8 +6971,7 @@ async function startDebianBuild() {
     const { ok, data } = await apiCall('/api/rootfs/build-debian', 'POST', {
         image_name: imageName,
         debian_version: version,
-        disk_size_mb: diskSize,
-        builder_dir: builderDir || '/home/Builder'
+        disk_size_mb: diskSize
     });
 
     if (!ok) {

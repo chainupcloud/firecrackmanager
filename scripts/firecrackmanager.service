@@ -14,12 +14,12 @@ StandardError=journal
 NoNewPrivileges=false
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/var/lib/firecrackmanager /run
+ReadWritePaths=/var/lib/firecrackmanager /run /home/Builder
 PrivateTmp=true
 
-# Required for creating TAP devices and bridges
-AmbientCapabilities=CAP_NET_ADMIN CAP_SYS_ADMIN
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_KILL
+# VM 管理、网络和 rootfs 构建所需 capabilities
+AmbientCapabilities=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_KILL CAP_NET_RAW CAP_CHOWN CAP_DAC_OVERRIDE CAP_SETUID CAP_SETGID CAP_SYS_CHROOT CAP_MKNOD CAP_FOWNER
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_KILL CAP_NET_RAW CAP_CHOWN CAP_DAC_OVERRIDE CAP_SETUID CAP_SETGID CAP_SYS_CHROOT CAP_MKNOD CAP_FOWNER
 
 [Install]
 WantedBy=multi-user.target

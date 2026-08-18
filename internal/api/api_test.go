@@ -131,6 +131,20 @@ func TestEnsureRootAuthorizedKeyCreatesIdempotentAuthorizedKeys(t *testing.T) {
 	}
 }
 
+func TestNormalizeVMIPAddressStripsCIDR(t *testing.T) {
+	tests := map[string]string{
+		"192.168.100.2/24":    "192.168.100.2",
+		" 192.168.100.3/24 ":  "192.168.100.3",
+		"192.168.100.4":       "192.168.100.4",
+		"":                    "",
+	}
+	for input, want := range tests {
+		if got := normalizeVMIPAddress(input); got != want {
+			t.Fatalf("normalizeVMIPAddress(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
 func entryNames(entries []os.DirEntry) []string {
 	names := make([]string, 0, len(entries))
 	for _, entry := range entries {
