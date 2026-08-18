@@ -5380,11 +5380,15 @@ function updateDestVMSelect() {
     networkVMs.forEach(vm => {
         if (vm.ip_address) {
             const opt = document.createElement('option');
-            opt.value = vm.ip_address;
+            opt.value = stripCIDR(vm.ip_address);
             opt.textContent = vm.name + ' (' + vm.ip_address + ')';
             select.appendChild(opt);
         }
     });
+}
+
+function stripCIDR(address) {
+    return (address || '').split('/')[0].trim();
 }
 
 async function loadFirewallRules(id) {
@@ -5491,13 +5495,14 @@ async function editFirewallRule(ruleId) {
     form.elements['description'].value = rule.description || '';
 
     const destSelect = document.getElementById('destVMSelect');
-    if (rule.dest_ip && !Array.from(destSelect.options).some(opt => opt.value === rule.dest_ip)) {
+    const ruleDestIP = stripCIDR(rule.dest_ip);
+    if (ruleDestIP && !Array.from(destSelect.options).some(opt => opt.value === ruleDestIP)) {
         const opt = document.createElement('option');
-        opt.value = rule.dest_ip;
-        opt.textContent = rule.dest_ip;
+        opt.value = ruleDestIP;
+        opt.textContent = ruleDestIP;
         destSelect.appendChild(opt);
     }
-    destSelect.value = rule.dest_ip || '';
+    destSelect.value = ruleDestIP;
 
     updateRuleTypeFields();
     document.getElementById('firewallRuleModalTitle').textContent = 'Edit Firewall Rule';
@@ -5529,7 +5534,7 @@ function buildFirewallRulePayload() {
             break;
         case 'port_forward':
             data.host_port = parseInt(formData.get('host_port'));
-            data.dest_ip = formData.get('dest_ip');
+            data.dest_ip = stripCIDR(formData.get('dest_ip'));
             data.dest_port = parseInt(formData.get('dest_port_fwd'));
             break;
         case 'port_allow':
