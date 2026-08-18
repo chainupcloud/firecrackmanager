@@ -1087,7 +1087,7 @@ func getServicesDetails(ctx context.Context, composePath string) ([]ServiceDetai
 				if p.HostIP != "" {
 					portStr = p.HostIP + ":"
 				}
-				portStr += fmt.Sprintf("%s:%s", p.Published, p.Target)
+				portStr += fmt.Sprintf("%s:%d", p.Published, p.Target)
 				if p.Protocol != "" && p.Protocol != "tcp" {
 					portStr += "/" + p.Protocol
 				}

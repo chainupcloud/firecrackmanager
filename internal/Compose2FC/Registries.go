@@ -3,6 +3,7 @@ package Compose2FC
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -126,7 +127,7 @@ func SearchPublicImages(ctx context.Context, query string, opts SearchOptions) (
 	})
 
 	if len(all) == 0 && len(errs) > 0 {
-		return nil, fmt.Errorf(strings.Join(errs, " | "))
+		return nil, errors.New(strings.Join(errs, " | "))
 	}
 
 	return all, nil
