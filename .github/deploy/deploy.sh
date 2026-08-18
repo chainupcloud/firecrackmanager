@@ -31,7 +31,9 @@ if [[ ! -f "${checksum}" ]]; then
 fi
 
 remote="${DEPLOY_USER}@${DEPLOY_HOST}"
-remote_tmp="/tmp/firecrackmanager-${GITHUB_SHA:-manual}"
+tmp_suffix="${GITHUB_RUN_ID:-manual}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-deploy}-$$"
+tmp_suffix="${tmp_suffix//[^A-Za-z0-9._-]/-}"
+remote_tmp="/tmp/firecrackmanager-${tmp_suffix}"
 ssh_opts=(
   -i "${SSH_KEY_PATH}"
   -p "${DEPLOY_SSH_PORT}"
