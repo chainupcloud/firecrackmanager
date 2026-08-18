@@ -1,0 +1,92 @@
+# Dependencies
+node_modules/
+.next/
+packages/contracts/lib/*
+!packages/contracts/lib/.gitkeep
+
+# Foundry
+out/
+cache/
+artifacts/
+broadcast/
+// ...existing code...
+contracts/*/lib/
+contracts/*/node_modules/
+
+# Re-include Go source packages named "cache"
+!**/internal/cache/
+
+# IDE
+.vscode/
+.idea/
+
+# Environment (secrets)
+.env
+.env.local
+.env.*.local
+# Deploy-time secret env sourced by service restart scripts (RELAYER_ADMIN_TOKEN
+# etc.). Untracked, per-service, never committed. Matches at any depth.
+.env.deploy
+.env.deploy.*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build
+dist/
+build/
+services/clob-service/clob-api
+services/clob-service/ws-service
+services/clob-service/bin/
+services/clob-service/*.test
+services/clob-service/*.out
+
+# Temp
+tmp/
+temp/
+.playwright-cli/
+
+
+/.claude/settings.local.json
+
+# TS build info
+*.tsbuildinfo
+
+# Keys / secrets
+keys/
+
+# Logs
+logs/
+
+# Compiled Go binaries
+bin/
+services/relayer-service/relayer-service
+services/data-service/data-service
+services/tenant-service/tenant-service
+
+# Local runtime configs (contain DB credentials / secrets)
+services/relayer-service/config.json
+services/data-service/config.json
+services/rtds-service/config.yaml
+/apps/tenant-admin/docs/superpowers/
+/services/tenant-service/docs/superpowers/
+/services/gamma-service/docs/superpowers/
+/.arts/
+/.kiro/
+/docs/superpowers/
+/.superpowers/
+/docs/specs/2026-04-13-market-detail-typography-design.md
+services/gamma-service/scripts/.run/*.log
+
+# AUDIT-09 Wave 3 housekeeping: stray local go build binaries
+services/*/server
+
+# Claude Telegram (added by claude-telegram-workspace/install.sh)
+.claude/channels/
+.claude/skills
+
+# Local-only notes and research (never committed)
+CLAUDE.local.md
+docs.local/
+.ccteam/
