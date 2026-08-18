@@ -6054,21 +6054,22 @@ func (wc *WebConsole) renderImagesPage() string {
 <div id="createDebianModal" class="modal">
     <div class="modal-content">
         <div class="modal-header">
-            <h3>Create Debian Image</h3>
+            <h3>Create Linux Image</h3>
             <span class="material-icons modal-close" onclick="closeModal('createDebianModal')">close</span>
         </div>
         <div class="modal-body">
             <form id="createDebianForm">
                 <div class="form-group">
-                    <label>Debian Version</label>
+                    <label>Distribution</label>
                     <select id="debianVersion" required>
+                        <option value="jammy">Ubuntu 22.04 LTS (Jammy)</option>
                         <option value="bookworm">Bookworm (Debian 12 - Stable)</option>
                         <option value="trixie">Trixie (Debian 13 - Testing)</option>
                     </select>
                 </div>
                 <div class="form-group">
                     <label>Image Name</label>
-                    <input type="text" id="debianImageName" required placeholder="debian-bookworm" pattern="[a-zA-Z0-9_-]+">
+                    <input type="text" id="debianImageName" required placeholder="ubuntu-22.04-base" pattern="[a-zA-Z0-9_-]+">
                     <small style="color: var(--text-secondary);">Only letters, numbers, dashes and underscores allowed</small>
                 </div>
                 <div class="form-group">

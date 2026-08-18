@@ -48,7 +48,7 @@ var (
 	conversionJobsMu sync.RWMutex
 )
 
-// Debian image build job tracking
+// Linux 镜像构建任务状态
 type DebianBuildJob struct {
 	ID            string    `json:"id"`
 	ImageName     string    `json:"image_name"`
@@ -1062,9 +1062,9 @@ func (s *Server) handleBuildDebianImage(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	// Validate Debian version
-	if req.DebianVersion != "bookworm" && req.DebianVersion != "trixie" {
-		s.jsonError(w, "debian_version must be 'bookworm' or 'trixie'", http.StatusBadRequest)
+	// 校验 Debian/Ubuntu 发行版代号
+	if req.DebianVersion != "bookworm" && req.DebianVersion != "trixie" && req.DebianVersion != "jammy" {
+		s.jsonError(w, "debian_version must be 'bookworm', 'trixie', or 'jammy'", http.StatusBadRequest)
 		return
 	}
 
@@ -1098,7 +1098,7 @@ func (s *Server) handleBuildDebianImage(w http.ResponseWriter, r *http.Request) 
 		Status:        "pending",
 		Progress:      0,
 		Step:          "initializing",
-		Message:       "Starting Debian image build...",
+		Message:       "Starting Linux image build...",
 		StartedAt:     time.Now(),
 	}
 
@@ -1112,7 +1112,7 @@ func (s *Server) handleBuildDebianImage(w http.ResponseWriter, r *http.Request) 
 	s.jsonResponse(w, map[string]interface{}{
 		"job_id":  jobID,
 		"status":  "started",
-		"message": "Debian image build started",
+		"message": "Linux image build started",
 	})
 }
 
@@ -1141,7 +1141,26 @@ func (s *Server) handleBuildDebianProgress(w http.ResponseWriter, r *http.Reques
 	s.jsonResponse(w, job)
 }
 
-// runDebianBuild executes the Debian image build process
+func debootstrapMirrorForSuite(suite string) string {
+	if suite == "jammy" {
+		return "http://archive.ubuntu.com/ubuntu/"
+	}
+	return "http://deb.debian.org/debian/"
+}
+
+func aptSourcesScript(suite string) string {
+	if suite != "jammy" {
+		return ""
+	}
+	return `cat > /etc/apt/sources.list <<'EOF'
+deb http://archive.ubuntu.com/ubuntu jammy main universe
+deb http://archive.ubuntu.com/ubuntu jammy-updates main universe
+deb http://security.ubuntu.com/ubuntu jammy-security main universe
+EOF
+`
+}
+
+// runDebianBuild 执行 Linux 镜像构建流程
 func (s *Server) runDebianBuild(job *DebianBuildJob, builderDir, rootfsDir string) {
 	updateJob := func(progress int, step, message string) {
 		debianBuildJobsMu.Lock()
@@ -1208,8 +1227,9 @@ func (s *Server) runDebianBuild(job *DebianBuildJob, builderDir, rootfsDir strin
 
 	// Step 3: Run debootstrap
 	updateJob(15, "debootstrap", "Running debootstrap (this may take several minutes)...")
-	s.logger("Running debootstrap for %s %s", job.ImageName, job.DebianVersion)
-	cmd := exec.Command("debootstrap", "--arch=amd64", job.DebianVersion, rootfsPath, "http://deb.debian.org/debian/")
+	mirror := debootstrapMirrorForSuite(job.DebianVersion)
+	s.logger("Running debootstrap for %s %s from %s", job.ImageName, job.DebianVersion, mirror)
+	cmd := exec.Command("debootstrap", "--arch=amd64", job.DebianVersion, rootfsPath, mirror)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		failJob(fmt.Errorf("debootstrap failed: %v: %s", err, string(output)))
 		return
@@ -1219,21 +1239,19 @@ func (s *Server) runDebianBuild(job *DebianBuildJob, builderDir, rootfsDir strin
 	updateJob(50, "configuring_chroot", "Configuring root filesystem...")
 
 	// Set root password to "root"
-	chrootScript := `#!/bin/bash
-set -e
+	chrootScript := fmt.Sprintf(`#!/bin/bash
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+%s
 echo "root:root" | chpasswd
 apt-get update
 apt-get install -y --no-install-recommends openssh-server iproute2 iputils-ping curl ca-certificates systemd-sysv haveged
-# Configure SSH to allow root login
-sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
-sed -i 's/PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
-# Enable SSH service
-systemctl enable ssh || true
-# Enable haveged for entropy generation
-systemctl enable haveged || true
+ssh-keygen -A
+systemctl enable ssh
+systemctl enable haveged
 apt-get clean
 rm -rf /var/lib/apt/lists/*
-`
+`, aptSourcesScript(job.DebianVersion))
 	scriptPath := filepath.Join(rootfsPath, "tmp", "setup.sh")
 	if err := os.WriteFile(scriptPath, []byte(chrootScript), 0755); err != nil {
 		failJob(fmt.Errorf("failed to write setup script: %v", err))
@@ -1249,11 +1267,20 @@ rm -rf /var/lib/apt/lists/*
 	// Remove setup script
 	os.Remove(scriptPath)
 
+	if err := ensureSSHRootPasswordLogin(rootfsPath); err != nil {
+		failJob(fmt.Errorf("failed to configure ssh password login: %v", err))
+		return
+	}
+	if err := ensureRootAuthorizedKey(rootfsPath, firecrackmanagerRootKey); err != nil {
+		failJob(fmt.Errorf("failed to install root public key: %v", err))
+		return
+	}
+
 	// Step 5: Create ext4 image file
 	updateJob(70, "creating_image", fmt.Sprintf("Creating %d MB ext4 image...", job.DiskSizeMB))
-	cmd = exec.Command("dd", "if=/dev/zero", "of="+imagePath, "bs=1M", fmt.Sprintf("count=%d", job.DiskSizeMB))
+	cmd = exec.Command("truncate", "-s", fmt.Sprintf("%dM", job.DiskSizeMB), imagePath)
 	if output, err := cmd.CombinedOutput(); err != nil {
-		failJob(fmt.Errorf("dd failed: %v: %s", err, string(output)))
+		failJob(fmt.Errorf("truncate failed: %v: %s", err, string(output)))
 		return
 	}
 
@@ -1289,7 +1316,7 @@ rm -rf /var/lib/apt/lists/*
 	finalPath := filepath.Join(rootfsDir, job.ImageName+".ext4")
 	if err := os.Rename(imagePath, finalPath); err != nil {
 		// Try copy if rename fails (different filesystem)
-		cmd = exec.Command("cp", imagePath, finalPath)
+		cmd = exec.Command("cp", "--reflink=auto", "--sparse=always", imagePath, finalPath)
 		if output, err := cmd.CombinedOutput(); err != nil {
 			failJob(fmt.Errorf("failed to move image: %v: %s", err, string(output)))
 			return
@@ -1323,13 +1350,13 @@ rm -rf /var/lib/apt/lists/*
 	job.Status = "completed"
 	job.Progress = 100
 	job.Step = "completed"
-	job.Message = "Debian image created successfully"
+	job.Message = "Linux image created successfully"
 	job.RootFSID = rootfsID
 	job.OutputPath = finalPath
 	job.EndedAt = time.Now()
 	debianBuildJobsMu.Unlock()
 
-	s.logger("Debian image build completed: %s (%s)", job.ImageName, finalPath)
+	s.logger("Linux image build completed: %s (%s)", job.ImageName, finalPath)
 }
 
 // CleanupOldJobs removes completed/failed jobs older than 1 hour

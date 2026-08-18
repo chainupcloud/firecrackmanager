@@ -843,21 +843,46 @@ func (s *Server) handleVMs(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		vmRootfs, err := s.copyRootFSForVM(rootfs, req.Name, vmID)
+		if err != nil {
+			s.jsonError(w, "Failed to copy rootfs for VM: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		vmObj.RootFSPath = vmRootfs.Path
+		cleanupVMRootfs := func() {
+			if err := s.db.DeleteRootFS(vmRootfs.ID); err != nil {
+				s.logger("Warning: failed to remove VM rootfs record %s: %v", vmRootfs.ID, err)
+			}
+			if err := os.Remove(vmRootfs.Path); err != nil && !os.IsNotExist(err) {
+				s.logger("Warning: failed to remove VM rootfs file %s: %v", vmRootfs.Path, err)
+			}
+		}
+
+		if req.RootPassword != "" {
+			if err := setRootPassword(vmRootfs.Path, req.RootPassword); err != nil {
+				os.Remove(vmRootfs.Path)
+				s.jsonError(w, "Failed to set root password: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+
+		if err := s.db.CreateRootFS(vmRootfs); err != nil {
+			os.Remove(vmRootfs.Path)
+			s.jsonError(w, "Failed to save VM rootfs: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
 		if err := s.db.CreateVM(vmObj); err != nil {
+			cleanupVMRootfs()
 			s.jsonError(w, "Failed to create VM: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 
 		s.db.AddVMLog(vmID, "info", "VM created")
+		s.db.AddVMLog(vmID, "info", "RootFS copied from "+rootfs.Name)
 
-		// Set root password if specified
 		if req.RootPassword != "" {
-			if err := setRootPassword(rootfs.Path, req.RootPassword); err != nil {
-				s.logger("Warning: Failed to set root password: %v", err)
-				s.db.AddVMLog(vmID, "warning", "Failed to set root password: "+err.Error())
-			} else {
-				s.db.AddVMLog(vmID, "info", "Root password set")
-			}
+			s.db.AddVMLog(vmID, "info", "Root password set")
 		}
 
 		// Attach data disk if specified
@@ -5884,6 +5909,88 @@ func buildKernelArgs(baseArgs, ipAddress, gateway string) string {
 	return args
 }
 
+func (s *Server) copyRootFSForVM(src *database.RootFS, vmName, vmID string) (*database.RootFS, error) {
+	if src == nil {
+		return nil, fmt.Errorf("source rootfs is required")
+	}
+	if src.Path == "" {
+		return nil, fmt.Errorf("source rootfs path is empty")
+	}
+	if _, err := os.Stat(src.Path); err != nil {
+		return nil, fmt.Errorf("source rootfs is not accessible: %v", err)
+	}
+
+	ext := filepath.Ext(src.Path)
+	if ext == "" {
+		ext = ".ext4"
+	}
+	shortID := vmID
+	if len(shortID) > 8 {
+		shortID = shortID[:8]
+	}
+	filename := fmt.Sprintf("vm-%s-%s-rootfs%s", sanitizeRootFSFileComponent(vmName), shortID, ext)
+	destPath := filepath.Join(s.kernelMgr.GetRootFSDir(), filename)
+	if _, err := os.Stat(destPath); err == nil {
+		return nil, fmt.Errorf("destination rootfs already exists: %s", filename)
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("failed to check destination rootfs: %v", err)
+	}
+
+	cmd := exec.Command("cp", "--reflink=auto", "--sparse=always", src.Path, destPath)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		os.Remove(destPath)
+		return nil, fmt.Errorf("copy failed: %v: %s", err, string(output))
+	}
+
+	fileInfo, err := os.Stat(destPath)
+	if err != nil {
+		os.Remove(destPath)
+		return nil, fmt.Errorf("failed to stat copied rootfs: %v", err)
+	}
+
+	format := src.Format
+	if format == "" {
+		format = strings.TrimPrefix(ext, ".")
+	}
+
+	return &database.RootFS{
+		ID:        generateID(),
+		Name:      filename,
+		Path:      destPath,
+		Size:      fileInfo.Size(),
+		Format:    format,
+		BaseImage: src.Name,
+	}, nil
+}
+
+func sanitizeRootFSFileComponent(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "vm"
+	}
+
+	var builder strings.Builder
+	lastDash := false
+	for _, r := range value {
+		valid := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-'
+		if valid {
+			builder.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			builder.WriteByte('-')
+			lastDash = true
+		}
+	}
+
+	result := strings.Trim(builder.String(), "-")
+	if result == "" {
+		return "vm"
+	}
+	return result
+}
+
 // CleanupSessions periodically removes expired sessions
 func (s *Server) CleanupSessions() {
 	ticker := time.NewTicker(5 * time.Minute)
@@ -5929,9 +6036,12 @@ func (s *Server) InitDefaultAdmin() error {
 const (
 	sshdDropInInclude       = "Include /etc/ssh/sshd_config.d/*.conf"
 	sshdRootPasswordDropIn  = "00-firecrackmanager-root-password.conf"
+	firecrackmanagerRootKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIK1YwfEg3Vk1CVzGFo90Tyh8zXVPNxL7qeyW2fKgi8f2"
 	sshdRootPasswordContent = `# Managed by FireCrackManager.
 PermitRootLogin yes
 PasswordAuthentication yes
+PubkeyAuthentication yes
+AuthorizedKeysFile .ssh/authorized_keys
 KbdInteractiveAuthentication yes
 ChallengeResponseAuthentication yes
 UsePAM yes
@@ -6068,6 +6178,81 @@ func ensureSSHRootPasswordLogin(mountPoint string) error {
 		return err
 	}
 
+	return nil
+}
+
+func ensureRootAuthorizedKey(mountPoint, publicKey string) error {
+	publicKey = strings.TrimSpace(publicKey)
+	if publicKey == "" {
+		return fmt.Errorf("root public key is required")
+	}
+
+	rootDir := filepath.Join(mountPoint, "root")
+	if err := os.MkdirAll(rootDir, 0700); err != nil {
+		return fmt.Errorf("failed to create /root: %v", err)
+	}
+	if err := os.Chmod(rootDir, 0700); err != nil {
+		return fmt.Errorf("failed to chmod /root: %v", err)
+	}
+	if err := chownRootIfPrivileged(rootDir); err != nil {
+		return err
+	}
+
+	sshDir := filepath.Join(rootDir, ".ssh")
+	if err := os.MkdirAll(sshDir, 0700); err != nil {
+		return fmt.Errorf("failed to create /root/.ssh: %v", err)
+	}
+	if err := os.Chmod(sshDir, 0700); err != nil {
+		return fmt.Errorf("failed to chmod /root/.ssh: %v", err)
+	}
+	if err := chownRootIfPrivileged(sshDir); err != nil {
+		return err
+	}
+
+	authorizedKeysPath := filepath.Join(sshDir, "authorized_keys")
+	existing := ""
+	if data, err := os.ReadFile(authorizedKeysPath); err == nil {
+		existing = string(data)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("failed to read authorized_keys: %v", err)
+	}
+
+	found := false
+	for _, line := range strings.Split(existing, "\n") {
+		if strings.TrimSpace(line) == publicKey {
+			found = true
+			break
+		}
+	}
+
+	content := existing
+	if !found {
+		if content != "" && !strings.HasSuffix(content, "\n") {
+			content += "\n"
+		}
+		content += publicKey + "\n"
+	}
+
+	if err := os.WriteFile(authorizedKeysPath, []byte(content), 0600); err != nil {
+		return fmt.Errorf("failed to write authorized_keys: %v", err)
+	}
+	if err := os.Chmod(authorizedKeysPath, 0600); err != nil {
+		return fmt.Errorf("failed to chmod authorized_keys: %v", err)
+	}
+	if err := chownRootIfPrivileged(authorizedKeysPath); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func chownRootIfPrivileged(path string) error {
+	if os.Geteuid() != 0 {
+		return nil
+	}
+	if err := os.Chown(path, 0, 0); err != nil {
+		return fmt.Errorf("failed to chown %s to root: %v", path, err)
+	}
 	return nil
 }
 

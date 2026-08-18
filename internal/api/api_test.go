@@ -39,6 +39,8 @@ func TestEnsureSSHRootPasswordLoginCreatesEarlyDropIn(t *testing.T) {
 	for _, want := range []string{
 		"PermitRootLogin yes",
 		"PasswordAuthentication yes",
+		"PubkeyAuthentication yes",
+		"AuthorizedKeysFile .ssh/authorized_keys",
 		"KbdInteractiveAuthentication yes",
 		"UsePAM yes",
 	} {
@@ -89,6 +91,43 @@ func TestEnsureSSHDConfigIncludesDropInsFirst(t *testing.T) {
 func TestEnsureSSHRootPasswordLoginNoSSHInstalled(t *testing.T) {
 	if err := ensureSSHRootPasswordLogin(t.TempDir()); err != nil {
 		t.Fatalf("ensureSSHRootPasswordLogin() error = %v", err)
+	}
+}
+
+func TestEnsureRootAuthorizedKeyCreatesIdempotentAuthorizedKeys(t *testing.T) {
+	mountPoint := t.TempDir()
+
+	if err := ensureRootAuthorizedKey(mountPoint, firecrackmanagerRootKey); err != nil {
+		t.Fatalf("ensureRootAuthorizedKey() error = %v", err)
+	}
+	if err := ensureRootAuthorizedKey(mountPoint, firecrackmanagerRootKey); err != nil {
+		t.Fatalf("ensureRootAuthorizedKey() second call error = %v", err)
+	}
+
+	authorizedKeysPath := filepath.Join(mountPoint, "root", ".ssh", "authorized_keys")
+	data, err := os.ReadFile(authorizedKeysPath)
+	if err != nil {
+		t.Fatalf("ReadFile(authorized_keys) error = %v", err)
+	}
+	content := string(data)
+	if strings.Count(content, firecrackmanagerRootKey) != 1 {
+		t.Fatalf("authorized_keys should contain key exactly once: %q", content)
+	}
+
+	info, err := os.Stat(authorizedKeysPath)
+	if err != nil {
+		t.Fatalf("Stat(authorized_keys) error = %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0600 {
+		t.Fatalf("authorized_keys permissions = %v, want 0600", got)
+	}
+
+	sshDirInfo, err := os.Stat(filepath.Join(mountPoint, "root", ".ssh"))
+	if err != nil {
+		t.Fatalf("Stat(.ssh) error = %v", err)
+	}
+	if got := sshDirInfo.Mode().Perm(); got != 0700 {
+		t.Fatalf(".ssh permissions = %v, want 0700", got)
 	}
 }
 
