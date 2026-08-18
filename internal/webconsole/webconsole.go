@@ -5134,7 +5134,7 @@ func (wc *WebConsole) renderNetworksPage() string {
                         <tr><td colspan="5">Loading...</td></tr>
                     </tbody>
                 </table>
-                <button class="btn btn-primary" onclick="openModal('addFirewallRuleModal')">
+                <button class="btn btn-primary" onclick="openAddFirewallRuleModal()">
                     <span class="material-icons">add</span>
                     Add Rule
                 </button>
@@ -5164,7 +5164,7 @@ func (wc *WebConsole) renderNetworksPage() string {
 <div id="addFirewallRuleModal" class="modal">
     <div class="modal-content">
         <div class="modal-header">
-            <h3>Add Firewall Rule</h3>
+            <h3 id="firewallRuleModalTitle">Add Firewall Rule</h3>
             <span class="material-icons modal-close" onclick="closeModal('addFirewallRuleModal')">close</span>
         </div>
         <div class="modal-body">
@@ -5221,7 +5221,7 @@ func (wc *WebConsole) renderNetworksPage() string {
         </div>
         <div class="modal-footer">
             <button type="button" class="btn btn-secondary" onclick="closeModal('addFirewallRuleModal')">Cancel</button>
-            <button type="button" class="btn btn-primary" onclick="addFirewallRule()">Add Rule</button>
+            <button type="button" class="btn btn-primary" id="firewallRuleSubmitButton" onclick="submitFirewallRule()">Add Rule</button>
         </div>
     </div>
 </div>
@@ -5244,6 +5244,7 @@ func (wc *WebConsole) renderNetworksPage() string {
 <script>
 let currentNetworkId = null;
 let networkVMs = [];
+let editingFirewallRuleId = null;
 
 async function loadNetworks() {
     const { ok, data } = await apiCall('/api/networks');
@@ -5420,6 +5421,9 @@ async function loadFirewallRules(id) {
                 <input type="checkbox" ${rule.enabled ? 'checked' : ''} onchange="toggleFirewallRule('${rule.id}', this.checked)">
             </td>
             <td>
+                <button class="btn btn-info btn-sm" onclick="editFirewallRule('${rule.id}')">
+                    <span class="material-icons">edit</span>
+                </button>
                 <button class="btn btn-danger btn-sm" onclick="deleteFirewallRule('${rule.id}')">
                     <span class="material-icons">delete</span>
                 </button>
@@ -5430,17 +5434,75 @@ async function loadFirewallRules(id) {
 
 async function toggleBlockExternal() {
     const checked = document.getElementById('blockExternalCheck').checked;
-    await apiCall('/api/networks/' + currentNetworkId + '/firewall', 'PUT', { block_external: checked });
+    const { ok, data } = await apiCall('/api/networks/' + currentNetworkId + '/firewall', 'PUT', { block_external: checked });
+    if (!ok) {
+        alert(data.error || 'Failed to update firewall');
+        loadFirewallRules(currentNetworkId);
+    }
 }
 
 async function toggleFirewallRule(ruleId, enabled) {
-    await apiCall('/api/networks/' + currentNetworkId + '/firewall/' + ruleId, 'PUT', { enabled: enabled });
+    const { ok, data } = await apiCall('/api/networks/' + currentNetworkId + '/firewall/' + ruleId, 'PUT', { enabled: enabled });
+    if (!ok) {
+        alert(data.error || 'Failed to update rule');
+    }
+    loadFirewallRules(currentNetworkId);
 }
 
 async function deleteFirewallRule(ruleId) {
     if (!await showConfirm('Delete this firewall rule?')) return;
-    const { ok } = await apiCall('/api/networks/' + currentNetworkId + '/firewall/' + ruleId, 'DELETE');
-    if (ok) loadFirewallRules(currentNetworkId);
+    const { ok, data } = await apiCall('/api/networks/' + currentNetworkId + '/firewall/' + ruleId, 'DELETE');
+    if (!ok) {
+        alert(data.error || 'Failed to delete rule');
+        return;
+    }
+    loadFirewallRules(currentNetworkId);
+}
+
+function openAddFirewallRuleModal() {
+    editingFirewallRuleId = null;
+    const form = document.getElementById('addFirewallRuleForm');
+    form.reset();
+    document.getElementById('firewallRuleModalTitle').textContent = 'Add Firewall Rule';
+    document.getElementById('firewallRuleSubmitButton').textContent = 'Add Rule';
+    updateRuleTypeFields();
+    updateDestVMSelect();
+    openModal('addFirewallRuleModal');
+}
+
+async function editFirewallRule(ruleId) {
+    const { ok, data: rule } = await apiCall('/api/networks/' + currentNetworkId + '/firewall/' + ruleId);
+    if (!ok) {
+        alert(rule.error || 'Failed to load rule');
+        return;
+    }
+
+    editingFirewallRuleId = ruleId;
+    await loadNetworkVMs(currentNetworkId);
+
+    const form = document.getElementById('addFirewallRuleForm');
+    form.reset();
+    form.elements['rule_type'].value = rule.rule_type || 'source_ip';
+    form.elements['source_ip'].value = rule.source_ip || '';
+    form.elements['host_port'].value = rule.host_port || '';
+    form.elements['dest_port_fwd'].value = rule.dest_port || '';
+    form.elements['dest_port_allow'].value = rule.dest_port || '';
+    form.elements['protocol'].value = rule.protocol || 'tcp';
+    form.elements['description'].value = rule.description || '';
+
+    const destSelect = document.getElementById('destVMSelect');
+    if (rule.dest_ip && !Array.from(destSelect.options).some(opt => opt.value === rule.dest_ip)) {
+        const opt = document.createElement('option');
+        opt.value = rule.dest_ip;
+        opt.textContent = rule.dest_ip;
+        destSelect.appendChild(opt);
+    }
+    destSelect.value = rule.dest_ip || '';
+
+    updateRuleTypeFields();
+    document.getElementById('firewallRuleModalTitle').textContent = 'Edit Firewall Rule';
+    document.getElementById('firewallRuleSubmitButton').textContent = 'Save Rule';
+    openModal('addFirewallRuleModal');
 }
 
 function updateRuleTypeFields() {
@@ -5450,7 +5512,7 @@ function updateRuleTypeFields() {
     document.getElementById('portAllowFields').style.display = type === 'port_allow' ? 'block' : 'none';
 }
 
-async function addFirewallRule() {
+function buildFirewallRulePayload() {
     const form = document.getElementById('addFirewallRuleForm');
     const formData = new FormData(form);
     const ruleType = formData.get('rule_type');
@@ -5475,13 +5537,23 @@ async function addFirewallRule() {
             break;
     }
 
-    const { ok, data: resp } = await apiCall('/api/networks/' + currentNetworkId + '/firewall', 'POST', data);
+    return data;
+}
+
+async function submitFirewallRule() {
+    const data = buildFirewallRulePayload();
+    const path = editingFirewallRuleId
+        ? '/api/networks/' + currentNetworkId + '/firewall/' + editingFirewallRuleId
+        : '/api/networks/' + currentNetworkId + '/firewall';
+    const method = editingFirewallRuleId ? 'PUT' : 'POST';
+    const { ok, data: resp } = await apiCall(path, method, data);
     if (ok) {
         closeModal('addFirewallRuleModal');
-        form.reset();
+        document.getElementById('addFirewallRuleForm').reset();
+        editingFirewallRuleId = null;
         loadFirewallRules(currentNetworkId);
     } else {
-        alert(resp.error || 'Failed to add rule');
+        alert(resp.error || 'Failed to save rule');
     }
 }
 

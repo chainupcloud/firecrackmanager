@@ -17,6 +17,7 @@ import (
 	"firecrackmanager/internal/api"
 	"firecrackmanager/internal/appliances"
 	"firecrackmanager/internal/database"
+	"firecrackmanager/internal/firewall"
 	"firecrackmanager/internal/hostnet"
 	"firecrackmanager/internal/kernel"
 	"firecrackmanager/internal/kernelbuilder"
@@ -121,6 +122,16 @@ func main() {
 	// Initialize network manager
 	netMgr := network.NewManager()
 	logger("Network manager initialized")
+
+	// 初始化防火墙管理器，NAT 和端口转发依赖 iptables。
+	if !firewall.CheckIptables() {
+		log.Fatalf("iptables is required for network NAT and port forwarding")
+	}
+	firewallMgr := firewall.NewManager(logger)
+	if err := firewallMgr.Initialize(); err != nil {
+		log.Fatalf("Failed to initialize firewall manager: %v", err)
+	}
+	logger("Firewall manager initialized")
 
 	// Initialize kernel manager
 	kernelMgr, err := kernel.NewManager(config.DataDir)
@@ -248,6 +259,7 @@ func main() {
 
 	// Initialize API server
 	apiServer := api.NewServer(db, vmMgr, netMgr, kernelMgr, upd, logger)
+	apiServer.SetFirewallManager(firewallMgr)
 	apiServer.SetHostNetManager(hostNetMgr, config.EnableHostNetworkManagement)
 	apiServer.SetBuilderDir(config.BuilderDir)
 	apiServer.SetDataDir(config.DataDir)
@@ -255,6 +267,10 @@ func main() {
 	apiServer.SetRootFSScanner(rootfsScanner)
 	apiServer.SetKernelUpdater(kernelUpd)
 	apiServer.SetAppliancesScanner(appliancesScanner)
+
+	if err := apiServer.RestoreActiveNetworkRules(); err != nil {
+		log.Fatalf("Failed to restore active network firewall rules: %v", err)
+	}
 
 	// Initialize kernel builder for compiling custom kernels
 	kernelBld := kernelbuilder.NewBuilder(db, config.DataDir, logger)

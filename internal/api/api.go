@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"firecrackmanager/internal/database"
+	"firecrackmanager/internal/firewall"
 	"firecrackmanager/internal/hostnet"
 	"firecrackmanager/internal/kernel"
 	"firecrackmanager/internal/kernelbuilder"
@@ -60,6 +61,7 @@ type Server struct {
 	vmMgr                       *vm.Manager
 	netMgr                      *network.Manager
 	kernelMgr                   *kernel.Manager
+	firewallMgr                 *firewall.Manager
 	mux                         *http.ServeMux
 	sessionMu                   sync.RWMutex
 	sessionCache                map[string]*database.Session
@@ -79,6 +81,18 @@ type Server struct {
 	ldapClient                  *ldap.Client
 	ldapClientMu                sync.RWMutex
 	kernelBuilder               *kernelbuilder.Builder
+}
+
+type firewallRuleRequest struct {
+	RuleType    *string `json:"rule_type"` // source_ip, port_forward, port_allow
+	SourceIP    *string `json:"source_ip"` // source_ip 规则的来源地址
+	DestIP      *string `json:"dest_ip"`   // port_forward 规则的 VM 地址
+	HostPort    *int    `json:"host_port"` // port_forward 规则的宿主机端口
+	DestPort    *int    `json:"dest_port"` // VM 目标端口
+	Protocol    *string `json:"protocol"`  // tcp, udp, all
+	Description *string `json:"description"`
+	Enabled     *bool   `json:"enabled"`
+	Priority    *int    `json:"priority"`
 }
 
 // RootFSScanner interface for triggering rootfs scans
@@ -132,6 +146,11 @@ func (s *Server) SetAppliancesScanner(scanner AppliancesScanner) {
 // SetKernelBuilder sets the kernel builder for compiling custom kernels
 func (s *Server) SetKernelBuilder(kb *kernelbuilder.Builder) {
 	s.kernelBuilder = kb
+}
+
+// SetFirewallManager 设置 Networks 使用的宿主机防火墙管理器。
+func (s *Server) SetFirewallManager(fm *firewall.Manager) {
+	s.firewallMgr = fm
 }
 
 // GetBuilderDir returns the current builder directory
@@ -2372,28 +2391,59 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 			s.jsonError(w, "Failed to create bridge: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
+		cleanupBridge := func() {
+			if err := s.removeNetworkFirewallRules(netObj); err != nil {
+				s.logger("Warning: failed to cleanup firewall rules for %s: %v", netObj.Name, err)
+			}
+			if err := s.netMgr.DeleteBridge(netObj.BridgeName); err != nil {
+				s.logger("Warning: failed to cleanup bridge %s: %v", netObj.BridgeName, err)
+			}
+		}
+
+		if netObj.MTU > 0 {
+			if err := s.netMgr.SetBridgeMTU(netObj.BridgeName, netObj.MTU); err != nil {
+				cleanupBridge()
+				s.jsonError(w, "Failed to set bridge MTU: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+		if err := s.netMgr.SetBridgeSTP(netObj.BridgeName, netObj.STP); err != nil {
+			cleanupBridge()
+			s.jsonError(w, "Failed to set bridge STP: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 
 		// Set IP on bridge
-		netmask, _ := network.SubnetToNetmask(netObj.Subnet)
+		netmask, err := network.SubnetToNetmask(netObj.Subnet)
+		if err != nil {
+			cleanupBridge()
+			s.jsonError(w, "Failed to calculate bridge netmask: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 		if err := s.netMgr.SetInterfaceIP(netObj.BridgeName, netObj.Gateway, netmask); err != nil {
+			cleanupBridge()
 			s.jsonError(w, "Failed to set bridge IP: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 
 		// Bring bridge up
 		if err := s.netMgr.SetInterfaceUp(netObj.BridgeName); err != nil {
+			cleanupBridge()
 			s.jsonError(w, "Failed to bring bridge up: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 
-		// Enable NAT if requested
-		if netObj.EnableNAT {
-			defaultIface, _ := network.GetDefaultInterface()
-			s.netMgr.SetupNAT(netObj.Gateway, netObj.Subnet, defaultIface)
+		if err := s.applyNetworkFirewallRules(netObj); err != nil {
+			cleanupBridge()
+			s.jsonError(w, "Failed to apply firewall rules: "+err.Error(), http.StatusInternalServerError)
+			return
 		}
 
-		netObj.Status = "active"
-		s.db.UpdateNetworkStatus(netID, "active")
+		if err := s.db.UpdateNetworkStatus(netID, "active"); err != nil {
+			cleanupBridge()
+			s.jsonError(w, "Failed to update network status", http.StatusInternalServerError)
+			return
+		}
 
 		s.jsonResponse(w, map[string]string{"status": "success", "message": "Network activated"})
 
@@ -2418,11 +2468,21 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// Delete bridge
-		s.netMgr.DeleteBridge(netObj.BridgeName)
+		if err := s.removeNetworkFirewallRules(netObj); err != nil {
+			s.jsonError(w, "Failed to remove firewall rules: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 
-		netObj.Status = "inactive"
-		s.db.UpdateNetworkStatus(netID, "inactive")
+		// Delete bridge
+		if err := s.netMgr.DeleteBridge(netObj.BridgeName); err != nil {
+			s.jsonError(w, "Failed to delete bridge: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		if err := s.db.UpdateNetworkStatus(netID, "inactive"); err != nil {
+			s.jsonError(w, "Failed to update network status", http.StatusInternalServerError)
+			return
+		}
 
 		s.jsonResponse(w, map[string]string{"status": "success", "message": "Network deactivated"})
 
@@ -2572,9 +2632,20 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 
 			// Cleanup bridge if active
 			if netObj.Status == "active" {
-				s.netMgr.DeleteBridge(netObj.BridgeName)
+				if err := s.removeNetworkFirewallRules(netObj); err != nil {
+					s.jsonError(w, "Failed to remove firewall rules: "+err.Error(), http.StatusInternalServerError)
+					return
+				}
+				if err := s.netMgr.DeleteBridge(netObj.BridgeName); err != nil {
+					s.jsonError(w, "Failed to delete bridge: "+err.Error(), http.StatusInternalServerError)
+					return
+				}
 			}
 
+			if err := s.db.DeleteFirewallRulesByNetwork(netID); err != nil {
+				s.jsonError(w, "Failed to delete firewall rules", http.StatusInternalServerError)
+				return
+			}
 			if err := s.db.DeleteNetwork(netID); err != nil {
 				s.jsonError(w, "Failed to delete network", http.StatusInternalServerError)
 				return
@@ -2611,7 +2682,7 @@ func (s *Server) handleNetworkFirewall(w http.ResponseWriter, r *http.Request, n
 		if ruleID != "" {
 			// Get single rule
 			rule, err := s.db.GetFirewallRule(ruleID)
-			if err != nil || rule == nil {
+			if err != nil || rule == nil || rule.NetworkID != networkID {
 				s.jsonError(w, "Rule not found", http.StatusNotFound)
 				return
 			}
@@ -2630,73 +2701,47 @@ func (s *Server) handleNetworkFirewall(w http.ResponseWriter, r *http.Request, n
 		}
 
 	case http.MethodPost:
-		var req struct {
-			RuleType    string `json:"rule_type"` // source_ip, port_forward, port_allow
-			SourceIP    string `json:"source_ip"` // For source_ip rules
-			DestIP      string `json:"dest_ip"`   // VM IP for port_forward
-			HostPort    int    `json:"host_port"` // External port for port_forward
-			DestPort    int    `json:"dest_port"` // Destination port
-			Protocol    string `json:"protocol"`  // tcp, udp, all
-			Description string `json:"description"`
-			Priority    int    `json:"priority"`
-		}
+		var req firewallRuleRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			s.jsonError(w, "Invalid request", http.StatusBadRequest)
 			return
 		}
 
-		if req.RuleType == "" {
+		if req.RuleType == nil {
 			s.jsonError(w, "Rule type is required", http.StatusBadRequest)
 			return
-		}
-
-		// Validate based on rule type
-		switch req.RuleType {
-		case "source_ip":
-			if req.SourceIP == "" {
-				s.jsonError(w, "Source IP is required for source_ip rules", http.StatusBadRequest)
-				return
-			}
-		case "port_forward":
-			if req.DestIP == "" || req.HostPort == 0 || req.DestPort == 0 {
-				s.jsonError(w, "dest_ip, host_port, and dest_port are required for port_forward rules", http.StatusBadRequest)
-				return
-			}
-		case "port_allow":
-			if req.DestPort == 0 {
-				s.jsonError(w, "dest_port is required for port_allow rules", http.StatusBadRequest)
-				return
-			}
-		default:
-			s.jsonError(w, "Invalid rule type", http.StatusBadRequest)
-			return
-		}
-
-		if req.Protocol == "" {
-			req.Protocol = "tcp"
-		}
-		if req.Priority == 0 {
-			req.Priority = 100
 		}
 
 		rule := &database.FirewallRule{
 			ID:          generateID(),
 			NetworkID:   networkID,
-			RuleType:    req.RuleType,
-			SourceIP:    req.SourceIP,
-			DestIP:      req.DestIP,
-			HostPort:    req.HostPort,
-			DestPort:    req.DestPort,
-			Protocol:    req.Protocol,
+			Protocol:    "tcp",
 			Action:      "allow",
-			Description: req.Description,
 			Enabled:     true,
-			Priority:    req.Priority,
+			Priority:    100,
+		}
+		applyFirewallRuleRequest(rule, req)
+		if err := validateFirewallRule(netObj, rule); err != nil {
+			s.jsonError(w, err.Error(), http.StatusBadRequest)
+			return
 		}
 
 		if err := s.db.CreateFirewallRule(rule); err != nil {
 			s.jsonError(w, "Failed to create firewall rule: "+err.Error(), http.StatusInternalServerError)
 			return
+		}
+
+		if netObj.Status == "active" {
+			if err := s.applyNetworkFirewallRules(netObj); err != nil {
+				if rollbackErr := s.db.DeleteFirewallRule(rule.ID); rollbackErr != nil {
+					s.logger("Warning: failed to rollback firewall rule %s: %v", rule.ID, rollbackErr)
+				}
+				if restoreErr := s.applyNetworkFirewallRules(netObj); restoreErr != nil {
+					s.logger("Warning: failed to restore previous firewall rules for network %s: %v", netObj.Name, restoreErr)
+				}
+				s.jsonError(w, "Failed to apply firewall rules: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
 		}
 
 		s.jsonResponse(w, map[string]interface{}{
@@ -2714,10 +2759,24 @@ func (s *Server) handleNetworkFirewall(w http.ResponseWriter, r *http.Request, n
 				s.jsonError(w, "Invalid request", http.StatusBadRequest)
 				return
 			}
+			oldBlockExternal := netObj.BlockExternal
 			netObj.BlockExternal = req.BlockExternal
 			if err := s.db.UpdateNetwork(netObj); err != nil {
 				s.jsonError(w, "Failed to update network", http.StatusInternalServerError)
 				return
+			}
+			if netObj.Status == "active" {
+				if err := s.applyNetworkFirewallRules(netObj); err != nil {
+					netObj.BlockExternal = oldBlockExternal
+					if rollbackErr := s.db.UpdateNetwork(netObj); rollbackErr != nil {
+						s.logger("Warning: failed to rollback block_external for network %s: %v", netObj.Name, rollbackErr)
+					}
+					if restoreErr := s.applyNetworkFirewallRules(netObj); restoreErr != nil {
+						s.logger("Warning: failed to restore previous firewall rules for network %s: %v", netObj.Name, restoreErr)
+					}
+					s.jsonError(w, "Failed to apply firewall rules: "+err.Error(), http.StatusInternalServerError)
+					return
+				}
 			}
 			s.jsonResponse(w, map[string]string{"status": "success"})
 			return
@@ -2725,34 +2784,39 @@ func (s *Server) handleNetworkFirewall(w http.ResponseWriter, r *http.Request, n
 
 		// Update specific rule
 		rule, err := s.db.GetFirewallRule(ruleID)
-		if err != nil || rule == nil {
+		if err != nil || rule == nil || rule.NetworkID != networkID {
 			s.jsonError(w, "Rule not found", http.StatusNotFound)
 			return
 		}
+		oldRule := *rule
 
-		var req struct {
-			Enabled     *bool  `json:"enabled"`
-			Description string `json:"description"`
-			Priority    int    `json:"priority"`
-		}
+		var req firewallRuleRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			s.jsonError(w, "Invalid request", http.StatusBadRequest)
 			return
 		}
 
-		if req.Enabled != nil {
-			rule.Enabled = *req.Enabled
-		}
-		if req.Description != "" {
-			rule.Description = req.Description
-		}
-		if req.Priority > 0 {
-			rule.Priority = req.Priority
+		applyFirewallRuleRequest(rule, req)
+		if err := validateFirewallRule(netObj, rule); err != nil {
+			s.jsonError(w, err.Error(), http.StatusBadRequest)
+			return
 		}
 
 		if err := s.db.UpdateFirewallRule(rule); err != nil {
 			s.jsonError(w, "Failed to update firewall rule", http.StatusInternalServerError)
 			return
+		}
+		if netObj.Status == "active" {
+			if err := s.applyNetworkFirewallRules(netObj); err != nil {
+				if rollbackErr := s.db.UpdateFirewallRule(&oldRule); rollbackErr != nil {
+					s.logger("Warning: failed to rollback firewall rule %s: %v", rule.ID, rollbackErr)
+				}
+				if restoreErr := s.applyNetworkFirewallRules(netObj); restoreErr != nil {
+					s.logger("Warning: failed to restore previous firewall rules for network %s: %v", netObj.Name, restoreErr)
+				}
+				s.jsonError(w, "Failed to apply firewall rules: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
 		}
 
 		s.jsonResponse(w, map[string]interface{}{
@@ -2766,9 +2830,27 @@ func (s *Server) handleNetworkFirewall(w http.ResponseWriter, r *http.Request, n
 			return
 		}
 
+		rule, err := s.db.GetFirewallRule(ruleID)
+		if err != nil || rule == nil || rule.NetworkID != networkID {
+			s.jsonError(w, "Rule not found", http.StatusNotFound)
+			return
+		}
+
 		if err := s.db.DeleteFirewallRule(ruleID); err != nil {
 			s.jsonError(w, "Failed to delete firewall rule", http.StatusInternalServerError)
 			return
+		}
+		if netObj.Status == "active" {
+			if err := s.applyNetworkFirewallRules(netObj); err != nil {
+				if rollbackErr := s.db.CreateFirewallRule(rule); rollbackErr != nil {
+					s.logger("Warning: failed to rollback deleted firewall rule %s: %v", rule.ID, rollbackErr)
+				}
+				if restoreErr := s.applyNetworkFirewallRules(netObj); restoreErr != nil {
+					s.logger("Warning: failed to restore previous firewall rules for network %s: %v", netObj.Name, restoreErr)
+				}
+				s.jsonError(w, "Failed to apply firewall rules: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
 		}
 
 		s.jsonResponse(w, map[string]string{"status": "success"})
@@ -2792,6 +2874,156 @@ func (s *Server) handlePhysicalInterfaces(w http.ResponseWriter, r *http.Request
 	}
 
 	s.jsonResponse(w, map[string]interface{}{"interfaces": interfaces})
+}
+
+// RestoreActiveNetworkRules 重放数据库中 active 网络的防火墙规则。
+func (s *Server) RestoreActiveNetworkRules() error {
+	networks, err := s.db.ListNetworks()
+	if err != nil {
+		return err
+	}
+	for _, netObj := range networks {
+		if netObj.Status != "active" {
+			continue
+		}
+		if err := s.applyNetworkFirewallRules(netObj); err != nil {
+			return fmt.Errorf("failed to restore firewall rules for network %s: %w", netObj.Name, err)
+		}
+	}
+	return nil
+}
+
+func (s *Server) applyNetworkFirewallRules(netObj *database.Network) error {
+	if s.firewallMgr == nil {
+		return fmt.Errorf("firewall manager is not initialized")
+	}
+
+	rules, err := s.db.ListFirewallRules(netObj.ID)
+	if err != nil {
+		return err
+	}
+
+	effectiveNet := *netObj
+	if networkRulesNeedOutInterface(&effectiveNet, rules) && effectiveNet.OutInterface == "" {
+		iface, err := network.GetDefaultInterface()
+		if err != nil {
+			return fmt.Errorf("failed to detect external interface: %w", err)
+		}
+		effectiveNet.OutInterface = iface
+	}
+
+	return s.firewallMgr.ApplyNetworkRules(&effectiveNet, rules)
+}
+
+func (s *Server) removeNetworkFirewallRules(netObj *database.Network) error {
+	if s.firewallMgr == nil {
+		return fmt.Errorf("firewall manager is not initialized")
+	}
+	return s.firewallMgr.RemoveNetworkRules(netObj)
+}
+
+func networkRulesNeedOutInterface(netObj *database.Network, rules []*database.FirewallRule) bool {
+	if netObj.EnableNAT || netObj.BlockExternal {
+		return true
+	}
+	for _, rule := range rules {
+		if rule.Enabled && rule.RuleType == firewall.RuleTypePortForward {
+			return true
+		}
+	}
+	return false
+}
+
+func applyFirewallRuleRequest(rule *database.FirewallRule, req firewallRuleRequest) {
+	if req.RuleType != nil {
+		rule.RuleType = strings.ToLower(strings.TrimSpace(*req.RuleType))
+	}
+	if req.SourceIP != nil {
+		rule.SourceIP = strings.TrimSpace(*req.SourceIP)
+	}
+	if req.DestIP != nil {
+		rule.DestIP = strings.TrimSpace(*req.DestIP)
+	}
+	if req.HostPort != nil {
+		rule.HostPort = *req.HostPort
+	}
+	if req.DestPort != nil {
+		rule.DestPort = *req.DestPort
+	}
+	if req.Protocol != nil {
+		rule.Protocol = strings.ToLower(strings.TrimSpace(*req.Protocol))
+	}
+	if req.Description != nil {
+		rule.Description = strings.TrimSpace(*req.Description)
+	}
+	if req.Enabled != nil {
+		rule.Enabled = *req.Enabled
+	}
+	if req.Priority != nil {
+		rule.Priority = *req.Priority
+	}
+}
+
+func validateFirewallRule(netObj *database.Network, rule *database.FirewallRule) error {
+	switch rule.Protocol {
+	case "tcp", "udp", "all":
+	default:
+		return fmt.Errorf("protocol must be tcp, udp, or all")
+	}
+
+	if rule.Priority <= 0 {
+		return fmt.Errorf("priority must be greater than 0")
+	}
+
+	switch rule.RuleType {
+	case firewall.RuleTypeSourceIP:
+		if rule.SourceIP == "" {
+			return fmt.Errorf("source_ip is required for source_ip rules")
+		}
+		if ip := net.ParseIP(rule.SourceIP); ip != nil {
+			if ip.To4() == nil {
+				return fmt.Errorf("source_ip must be an IPv4 address or CIDR")
+			}
+		} else {
+			cidrIP, _, err := net.ParseCIDR(rule.SourceIP)
+			if err != nil || cidrIP.To4() == nil {
+				return fmt.Errorf("source_ip must be an IPv4 address or CIDR")
+			}
+		}
+
+	case firewall.RuleTypePortForward:
+		if rule.DestIP == "" {
+			return fmt.Errorf("dest_ip is required for port_forward rules")
+		}
+		if err := validatePort("host_port", rule.HostPort); err != nil {
+			return err
+		}
+		if err := validatePort("dest_port", rule.DestPort); err != nil {
+			return err
+		}
+		if ok, err := network.IPInSubnet(rule.DestIP, netObj.Subnet); err != nil {
+			return err
+		} else if !ok {
+			return fmt.Errorf("dest_ip must be inside network subnet")
+		}
+
+	case firewall.RuleTypePortAllow:
+		if err := validatePort("dest_port", rule.DestPort); err != nil {
+			return err
+		}
+
+	default:
+		return fmt.Errorf("invalid rule_type")
+	}
+
+	return nil
+}
+
+func validatePort(name string, port int) error {
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("%s must be between 1 and 65535", name)
+	}
+	return nil
 }
 
 // VM Search handler

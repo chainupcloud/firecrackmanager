@@ -817,11 +817,18 @@ func (d *DB) GetVMsByNetwork(networkID string) ([]*VM, error) {
 	defer d.mu.RUnlock()
 
 	rows, err := d.db.Query(`
-		SELECT id, name, vcpu, memory_mb, kernel_path, rootfs_path, kernel_args,
-			COALESCE(network_id, ''), COALESCE(mac_address, ''), COALESCE(ip_address, ''),
-			COALESCE(dns_servers, ''), COALESCE(snapshot_type, ''), COALESCE(tap_device, ''), COALESCE(socket_path, ''), status, pid,
-			COALESCE(autorun, 0), COALESCE(error_message, ''), created_at, updated_at
-		FROM vms WHERE network_id = ? ORDER BY created_at DESC`, networkID)
+		SELECT v.id, v.name, v.vcpu, v.memory_mb, v.kernel_path, v.rootfs_path, v.kernel_args,
+			COALESCE(vn.network_id, v.network_id, ''),
+			COALESCE(NULLIF(vn.mac_address, ''), v.mac_address, ''),
+			COALESCE(NULLIF(vn.ip_address, ''), v.ip_address, ''),
+			COALESCE(v.dns_servers, ''), COALESCE(v.snapshot_type, ''),
+			COALESCE(NULLIF(vn.tap_device, ''), v.tap_device, ''),
+			COALESCE(v.socket_path, ''), v.status, v.pid,
+			COALESCE(v.autorun, 0), COALESCE(v.error_message, ''), v.created_at, v.updated_at
+		FROM vms v
+		LEFT JOIN vm_networks vn ON vn.vm_id = v.id AND vn.network_id = ?
+		WHERE v.network_id = ? OR vn.network_id = ?
+		ORDER BY v.created_at DESC, COALESCE(vn.iface_index, 0) ASC`, networkID, networkID, networkID)
 	if err != nil {
 		return nil, err
 	}
