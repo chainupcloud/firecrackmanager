@@ -3886,25 +3886,17 @@ func (s *Server) handleRootFSDuplicate(w http.ResponseWriter, r *http.Request, r
 		return
 	}
 
-	// Copy the file
-	srcFile, err := os.Open(srcRootfs.Path)
-	if err != nil {
-		s.jsonError(w, "Failed to open source rootfs: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	defer srcFile.Close()
-
-	destFile, err := os.Create(destPath)
-	if err != nil {
-		s.jsonError(w, "Failed to create destination file: "+err.Error(), http.StatusInternalServerError)
+	cmd := exec.Command("cp", "--reflink=auto", "--sparse=always", srcRootfs.Path, destPath)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		os.Remove(destPath)
+		s.jsonError(w, "Failed to copy rootfs: "+fmt.Sprintf("%v: %s", err, string(output)), http.StatusInternalServerError)
 		return
 	}
 
-	written, err := io.Copy(destFile, srcFile)
-	destFile.Close()
+	fileInfo, err := os.Stat(destPath)
 	if err != nil {
 		os.Remove(destPath)
-		s.jsonError(w, "Failed to copy rootfs: "+err.Error(), http.StatusInternalServerError)
+		s.jsonError(w, "Failed to stat duplicated rootfs: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -3914,7 +3906,7 @@ func (s *Server) handleRootFSDuplicate(w http.ResponseWriter, r *http.Request, r
 		ID:        newID,
 		Name:      req.Name,
 		Path:      destPath,
-		Size:      written,
+		Size:      fileInfo.Size(),
 		Format:    srcRootfs.Format,
 		BaseImage: srcRootfs.Name,
 	}
@@ -3923,6 +3915,21 @@ func (s *Server) handleRootFSDuplicate(w http.ResponseWriter, r *http.Request, r
 		os.Remove(destPath)
 		s.jsonError(w, "Failed to save rootfs to database: "+err.Error(), http.StatusInternalServerError)
 		return
+	}
+
+	if srcRootfs.DiskType != "" {
+		newRootfs.DiskType = srcRootfs.DiskType
+		newRootfs.InitSystem = srcRootfs.InitSystem
+		newRootfs.OSRelease = srcRootfs.OSRelease
+		newRootfs.SSHInstalled = srcRootfs.SSHInstalled
+		newRootfs.SSHVersion = srcRootfs.SSHVersion
+		newRootfs.ScannedAt = time.Now()
+		if err := s.db.UpdateRootFS(newRootfs); err != nil {
+			s.logger("Warning: failed to copy scan metadata for duplicated rootfs %s: %v", newRootfs.ID, err)
+		}
+	}
+	if s.rootfsScanner != nil {
+		s.rootfsScanner.TriggerScan()
 	}
 
 	s.logger("Duplicated rootfs %s to %s", srcRootfs.Name, req.Name)

@@ -6105,6 +6105,21 @@ func (wc *WebConsole) renderImagesPage() string {
 </div>
 
 <script>
+let rootfsRefreshTimer = null;
+
+function scheduleRootfsRefresh(hasPendingScan) {
+    if (rootfsRefreshTimer) {
+        clearTimeout(rootfsRefreshTimer);
+        rootfsRefreshTimer = null;
+    }
+    if (!hasPendingScan) return;
+
+    rootfsRefreshTimer = setTimeout(() => {
+        rootfsRefreshTimer = null;
+        loadRootfs();
+    }, 3000);
+}
+
 async function loadKernels() {
     const { ok, data } = await apiCall('/api/kernels');
     if (!ok) return;
@@ -6145,9 +6160,11 @@ async function loadRootfs() {
     const tbody = document.getElementById('rootfsList');
     if (!data.rootfs || data.rootfs.length === 0) {
         tbody.innerHTML = '<tr><td colspan="7" class="empty-state"><span class="material-icons">storage</span><p>No root filesystems</p></td></tr>';
+        scheduleRootfsRefresh(false);
         return;
     }
 
+    let hasPendingScan = false;
     tbody.innerHTML = data.rootfs.map(r => {
         // Disk type badge
         let typeBadge = '';
@@ -6158,6 +6175,7 @@ async function loadRootfs() {
         } else if (r.disk_type === 'unknown') {
             typeBadge = '<span class="badge badge-warning">Unknown</span>';
         } else {
+            hasPendingScan = true;
             typeBadge = '<span class="badge badge-secondary">Scanning...</span>';
         }
 
@@ -6214,6 +6232,7 @@ async function loadRootfs() {
         </tr>
     ` + "`" + `;
     }).join('');
+    scheduleRootfsRefresh(hasPendingScan);
 }
 
 async function downloadKernel() {
