@@ -1196,7 +1196,7 @@ func (s *Server) runDebianBuild(job *DebianBuildJob, builderDir, rootfsDir strin
 	workDir := filepath.Join(builderDir, job.ImageName)
 	rootfsPath := filepath.Join(workDir, "rootfs")
 	imagePath := filepath.Join(workDir, job.ImageName+".ext4")
-	mountPath := filepath.Join("/mnt", job.ImageName)
+	mountPath := filepath.Join(workDir, "mnt")
 
 	// Cleanup function
 	defer func() {
