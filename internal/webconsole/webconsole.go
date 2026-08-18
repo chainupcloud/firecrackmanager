@@ -1232,8 +1232,8 @@ func (wc *WebConsole) renderVMsPage() string {
                     <input type="text" name="kernel_args" placeholder="console=ttyS0,115200n8 reboot=k panic=1">
                 </div>
                 <div class="form-group">
-                    <label>DNS Servers (optional)</label>
-                    <input type="text" name="dns_servers" placeholder="8.8.8.8,8.8.4.4">
+                    <label>DNS Servers</label>
+                    <input type="text" name="dns_servers" value="8.8.8.8" placeholder="8.8.8.8,8.8.4.4">
                     <small class="small-text-tip" style="color: var(--text-secondary); font-size: 11px;">Comma-separated DNS server IPs. Applied to /etc/resolv.conf on VM start.</small>
                 </div>
                 <div class="form-group">
@@ -5597,7 +5597,8 @@ function showNetworkTab(tab) {
     modal.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
 
     const button = modal.querySelector('.tab-btn[onclick*="' + tab + '"]');
-    const tabContent = document.getElementById('network' + tab.charAt(0).toUpperCase() + tab.slice(1) + 'Tab');
+    const tabId = tab === 'vms' ? 'networkVMsTab' : 'network' + tab.charAt(0).toUpperCase() + tab.slice(1) + 'Tab';
+    const tabContent = document.getElementById(tabId);
     if (button) button.classList.add('active');
     if (tabContent) tabContent.classList.add('active');
 
@@ -6033,8 +6034,8 @@ func (wc *WebConsole) renderImagesPage() string {
                     <small class="small-text-tip" style="color: var(--text-secondary); font-size: 11px;">Attach an additional data disk to the VM.</small>
                 </div>
                 <div class="form-group">
-                    <label>DNS Servers (optional)</label>
-                    <input type="text" name="dns_servers" placeholder="8.8.8.8,8.8.4.4">
+                    <label>DNS Servers</label>
+                    <input type="text" name="dns_servers" value="8.8.8.8" placeholder="8.8.8.8,8.8.4.4">
                     <small class="small-text-tip" style="color: var(--text-secondary); font-size: 11px;">Comma-separated DNS server IPs.</small>
                 </div>
                 <div class="form-group">

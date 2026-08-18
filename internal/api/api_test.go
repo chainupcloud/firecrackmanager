@@ -145,6 +145,68 @@ func TestNormalizeVMIPAddressStripsCIDR(t *testing.T) {
 	}
 }
 
+func TestDefaultVMDNSServers(t *testing.T) {
+	if got := defaultVMDNSServers(""); got != "8.8.8.8" {
+		t.Fatalf("defaultVMDNSServers(empty) = %q, want 8.8.8.8", got)
+	}
+	if got := defaultVMDNSServers(" 1.1.1.1 "); got != "1.1.1.1" {
+		t.Fatalf("defaultVMDNSServers(custom) = %q, want 1.1.1.1", got)
+	}
+}
+
+func TestSanitizeVMHostname(t *testing.T) {
+	tests := map[string]string{
+		"dev-01":      "dev-01",
+		"DEV_01.prod": "dev-01-prod",
+		"---":         "vm",
+		"$$ VM":       "vm",
+		"app..server": "app-server",
+	}
+	for input, want := range tests {
+		if got := sanitizeVMHostname(input); got != want {
+			t.Fatalf("sanitizeVMHostname(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestUpdateVMHostsFileSetsHostnameIdempotently(t *testing.T) {
+	mountPoint := t.TempDir()
+	etcDir := filepath.Join(mountPoint, "etc")
+	if err := os.MkdirAll(etcDir, 0755); err != nil {
+		t.Fatalf("MkdirAll(etc) error = %v", err)
+	}
+	hostsPath := filepath.Join(etcDir, "hosts")
+	original := "# existing\n127.0.0.1 localhost\n127.0.1.1 old-host\n10.0.0.2 app\n"
+	if err := os.WriteFile(hostsPath, []byte(original), 0644); err != nil {
+		t.Fatalf("WriteFile(hosts) error = %v", err)
+	}
+
+	if err := updateVMHostsFile(mountPoint, "dev-01"); err != nil {
+		t.Fatalf("updateVMHostsFile() error = %v", err)
+	}
+	if err := updateVMHostsFile(mountPoint, "dev-01"); err != nil {
+		t.Fatalf("updateVMHostsFile() second call error = %v", err)
+	}
+
+	data, err := os.ReadFile(hostsPath)
+	if err != nil {
+		t.Fatalf("ReadFile(hosts) error = %v", err)
+	}
+	content := string(data)
+	if strings.Count(content, "127.0.1.1\tdev-01") != 1 {
+		t.Fatalf("hosts should contain one managed hostname entry: %s", content)
+	}
+	if strings.Contains(content, "old-host") {
+		t.Fatalf("hosts should replace old 127.0.1.1 hostname: %s", content)
+	}
+	if !strings.Contains(content, "127.0.0.1 localhost") {
+		t.Fatalf("hosts should keep localhost entry: %s", content)
+	}
+	if !strings.Contains(content, "10.0.0.2 app") {
+		t.Fatalf("hosts should preserve unrelated entries: %s", content)
+	}
+}
+
 func entryNames(entries []os.DirEntry) []string {
 	names := make([]string, 0, len(entries))
 	for _, entry := range entries {

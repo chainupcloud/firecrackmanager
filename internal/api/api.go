@@ -775,6 +775,7 @@ func (s *Server) handleVMs(w http.ResponseWriter, r *http.Request) {
 		if req.MemoryMB <= 0 {
 			req.MemoryMB = 512
 		}
+		req.DNSServers = defaultVMDNSServers(req.DNSServers)
 
 		vmID := generateID()
 
@@ -856,6 +857,13 @@ func (s *Server) handleVMs(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		vmHostname, err := configureVMIdentity(vmRootfs.Path, req.Name)
+		if err != nil {
+			os.Remove(vmRootfs.Path)
+			s.jsonError(w, "Failed to configure VM hostname: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
 		if req.RootPassword != "" {
 			if err := setRootPassword(vmRootfs.Path, req.RootPassword); err != nil {
 				os.Remove(vmRootfs.Path)
@@ -878,6 +886,7 @@ func (s *Server) handleVMs(w http.ResponseWriter, r *http.Request) {
 
 		s.db.AddVMLog(vmID, "info", "VM created")
 		s.db.AddVMLog(vmID, "info", "RootFS copied from "+rootfs.Name)
+		s.db.AddVMLog(vmID, "info", "Hostname configured: "+vmHostname)
 
 		if req.RootPassword != "" {
 			s.db.AddVMLog(vmID, "info", "Root password set")
@@ -5964,6 +5973,153 @@ func (s *Server) copyRootFSForVM(src *database.RootFS, vmName, vmID string) (*da
 		Format:    format,
 		BaseImage: src.Name,
 	}, nil
+}
+
+func defaultVMDNSServers(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "8.8.8.8"
+	}
+	return value
+}
+
+func configureVMIdentity(rootfsPath, vmName string) (string, error) {
+	hostname := sanitizeVMHostname(vmName)
+
+	mountPoint, err := os.MkdirTemp("", "rootfs-hostname-*")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(mountPoint)
+
+	mountCmd := exec.Command("mount", "-o", "loop", rootfsPath, mountPoint)
+	if output, err := mountCmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("mount failed: %v: %s", err, string(output))
+	}
+	defer exec.Command("umount", mountPoint).Run()
+
+	etcDir := filepath.Join(mountPoint, "etc")
+	info, err := os.Stat(etcDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("/etc not found in rootfs")
+		}
+		return "", fmt.Errorf("failed to stat /etc: %v", err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("/etc is not a directory")
+	}
+
+	hostnamePath := filepath.Join(etcDir, "hostname")
+	if err := os.WriteFile(hostnamePath, []byte(hostname+"\n"), 0644); err != nil {
+		return "", fmt.Errorf("failed to write /etc/hostname: %v", err)
+	}
+
+	if err := updateVMHostsFile(mountPoint, hostname); err != nil {
+		return "", err
+	}
+
+	return hostname, nil
+}
+
+func sanitizeVMHostname(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "vm"
+	}
+
+	var builder strings.Builder
+	lastDash := false
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+			builder.WriteRune(r)
+			lastDash = false
+		case r >= 'A' && r <= 'Z':
+			builder.WriteRune(r + ('a' - 'A'))
+			lastDash = false
+		case r >= '0' && r <= '9':
+			builder.WriteRune(r)
+			lastDash = false
+		case r == '-':
+			if builder.Len() > 0 && !lastDash {
+				builder.WriteByte('-')
+				lastDash = true
+			}
+		default:
+			if builder.Len() > 0 && !lastDash {
+				builder.WriteByte('-')
+				lastDash = true
+			}
+		}
+	}
+
+	result := strings.Trim(builder.String(), "-")
+	if len(result) > 63 {
+		result = strings.TrimRight(result[:63], "-")
+	}
+	if result == "" {
+		return "vm"
+	}
+	return result
+}
+
+func updateVMHostsFile(mountPoint, hostname string) error {
+	hostsPath := filepath.Join(mountPoint, "etc", "hosts")
+	existing := ""
+	if data, err := os.ReadFile(hostsPath); err == nil {
+		existing = strings.ReplaceAll(string(data), "\r\n", "\n")
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("failed to read /etc/hosts: %v", err)
+	}
+
+	if strings.TrimSpace(existing) == "" {
+		content := "127.0.0.1\tlocalhost\n127.0.1.1\t" + hostname + "\n"
+		return os.WriteFile(hostsPath, []byte(content), 0644)
+	}
+
+	lines := strings.Split(existing, "\n")
+	updated := make([]string, 0, len(lines)+2)
+	hasLocalhost := false
+	hasVMHostname := false
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
+			fields := strings.Fields(trimmed)
+			if len(fields) > 0 {
+				if fields[0] == "127.0.0.1" {
+					for _, field := range fields[1:] {
+						if field == "localhost" {
+							hasLocalhost = true
+							break
+						}
+					}
+				}
+				if fields[0] == "127.0.1.1" {
+					if !hasVMHostname {
+						updated = append(updated, "127.0.1.1\t"+hostname)
+						hasVMHostname = true
+					}
+					continue
+				}
+			}
+		}
+		updated = append(updated, line)
+	}
+
+	if !hasLocalhost {
+		updated = append([]string{"127.0.0.1\tlocalhost"}, updated...)
+	}
+	if !hasVMHostname {
+		updated = append(updated, "127.0.1.1\t"+hostname)
+	}
+	for len(updated) > 0 && strings.TrimSpace(updated[len(updated)-1]) == "" {
+		updated = updated[:len(updated)-1]
+	}
+
+	content := strings.Join(updated, "\n") + "\n"
+	return os.WriteFile(hostsPath, []byte(content), 0644)
 }
 
 func sanitizeRootFSFileComponent(value string) string {
