@@ -4965,8 +4965,8 @@ async function expandRootFS() {
             </div>
             <div class="form-group">
                 <label>New Size (MB)</label>
-                <input type="number" id="expandRootFSNewSize" required min="128" max="102400" step="128">
-                <small style="color: var(--text-secondary); font-size: 11px;">Must be larger than current size. Maximum 100 GB.</small>
+                <input type="number" id="expandRootFSNewSize" required min="128" step="128">
+                <small style="color: var(--text-secondary); font-size: 11px;">Must be larger than current size.</small>
             </div>
             <div id="expandRootFSProgress" style="display: none; margin-top: 15px;">
                 <div style="display: flex; align-items: center; gap: 10px;">
@@ -6115,8 +6115,8 @@ func (wc *WebConsole) renderImagesPage() string {
                 </div>
                 <div class="form-group">
                     <label>New Size (MB)</label>
-                    <input type="number" id="extendDiskNewSize" required min="128" max="102400" step="128">
-                    <small style="color: var(--text-secondary); font-size: 11px;">Minimum 128 MB, maximum 100 GB. Must be larger than current size.</small>
+                    <input type="number" id="extendDiskNewSize" required min="128" step="128">
+                    <small style="color: var(--text-secondary); font-size: 11px;">Minimum 128 MB. Must be larger than current size.</small>
                 </div>
             </form>
             <div id="extendDiskProgress" style="display: none; margin-top: 15px;">
@@ -6220,8 +6220,8 @@ func (wc *WebConsole) renderImagesPage() string {
                 </div>
                 <div class="form-group">
                     <label>Disk Size (MB)</label>
-                    <input type="number" id="debianDiskSize" required value="1024" min="512" max="20480" step="128">
-                    <small style="color: var(--text-secondary);">Minimum 512 MB, maximum 20 GB</small>
+                    <input type="number" id="debianDiskSize" required value="1024" min="512" step="128">
+                    <small style="color: var(--text-secondary);">Minimum 512 MB</small>
                 </div>
                 <div class="form-group">
                     <label>Builder Directory</label>
@@ -7124,8 +7124,8 @@ async function startDebianBuild() {
         return;
     }
 
-    if (diskSize < 512 || diskSize > 20480) {
-        alert('Disk size must be between 512 MB and 20 GB');
+    if (!diskSize || diskSize < 512) {
+        alert('Disk size must be at least 512 MB');
         return;
     }
 

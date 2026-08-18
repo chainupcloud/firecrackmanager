@@ -1076,9 +1076,9 @@ func (s *Server) handleBuildDebianImage(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Validate disk size (min 512MB, max 20480MB/20GB)
-	if req.DiskSizeMB < 512 || req.DiskSizeMB > 20480 {
-		s.jsonError(w, "disk_size_mb must be between 512 and 20480", http.StatusBadRequest)
+	// Validate disk size (min 512MB)
+	if req.DiskSizeMB < 512 {
+		s.jsonError(w, "disk_size_mb must be at least 512", http.StatusBadRequest)
 		return
 	}
 

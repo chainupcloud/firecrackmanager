@@ -2830,27 +2830,45 @@ func (m *Manager) updateRootFSDNS(rootfsPath, dnsServers string) error {
 		}
 	}()
 
+	if err := writeRootFSDNSConfig(mountPoint, dnsServers, m.logger); err != nil {
+		return err
+	}
+
+	m.logger("Updated DNS configuration in rootfs: %s", dnsServers)
+	return nil
+}
+
+func parseDNSServers(dnsServers string, logger func(string, ...interface{})) []string {
+	var servers []string
+	for _, server := range strings.Split(dnsServers, ",") {
+		server = strings.TrimSpace(server)
+		if server == "" {
+			continue
+		}
+		if net.ParseIP(server) == nil {
+			if logger != nil {
+				logger("Warning: invalid DNS server IP: %s", server)
+			}
+			continue
+		}
+		servers = append(servers, server)
+	}
+	return servers
+}
+
+func writeRootFSDNSConfig(mountPoint, dnsServers string, logger func(string, ...interface{})) error {
+	servers := parseDNSServers(dnsServers, logger)
+	if len(servers) == 0 {
+		return fmt.Errorf("no valid DNS server IPs configured")
+	}
+
 	// Build resolv.conf content
 	var content strings.Builder
 	content.WriteString("# DNS configuration managed by FireCrackManager\n")
 	content.WriteString("# Generated at: " + time.Now().Format(time.RFC3339) + "\n")
-
-	// Parse comma-separated DNS servers
-	servers := strings.Split(dnsServers, ",")
 	for _, server := range servers {
-		server = strings.TrimSpace(server)
-		if server != "" {
-			// Validate it looks like an IP address
-			if net.ParseIP(server) != nil {
-				content.WriteString("nameserver " + server + "\n")
-			} else {
-				m.logger("Warning: invalid DNS server IP: %s", server)
-			}
-		}
+		content.WriteString("nameserver " + server + "\n")
 	}
-
-	// Write resolv.conf
-	resolvPath := filepath.Join(mountPoint, "etc", "resolv.conf")
 
 	// Ensure /etc directory exists
 	etcDir := filepath.Join(mountPoint, "etc")
@@ -2860,12 +2878,29 @@ func (m *Manager) updateRootFSDNS(rootfsPath, dnsServers string) error {
 		}
 	}
 
-	// Write the file
+	resolvPath := filepath.Join(etcDir, "resolv.conf")
+	// Ubuntu/systemd 镜像常把 /etc/resolv.conf 链到 /run；启动后 /run 是临时目录，会丢掉离线写入。
+	if info, err := os.Lstat(resolvPath); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		if err := os.Remove(resolvPath); err != nil {
+			return fmt.Errorf("failed to replace resolv.conf symlink: %w", err)
+		}
+	}
 	if err := os.WriteFile(resolvPath, []byte(content.String()), 0644); err != nil {
 		return fmt.Errorf("failed to write resolv.conf: %w", err)
 	}
 
-	m.logger("Updated DNS configuration in rootfs: %s", dnsServers)
+	resolvedDir := filepath.Join(etcDir, "systemd", "resolved.conf.d")
+	if _, err := os.Stat(filepath.Join(mountPoint, "usr", "lib", "systemd", "systemd")); err == nil {
+		if err := os.MkdirAll(resolvedDir, 0755); err != nil {
+			return fmt.Errorf("failed to create systemd-resolved config directory: %w", err)
+		}
+		resolvedContent := "[Resolve]\nDNS=" + strings.Join(servers, " ") + "\n"
+		resolvedPath := filepath.Join(resolvedDir, "99-firecrackmanager-dns.conf")
+		if err := os.WriteFile(resolvedPath, []byte(resolvedContent), 0644); err != nil {
+			return fmt.Errorf("failed to write systemd-resolved DNS config: %w", err)
+		}
+	}
+
 	return nil
 }
 
