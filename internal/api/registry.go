@@ -956,7 +956,7 @@ func (s *Server) handleRootFSExtend(w http.ResponseWriter, r *http.Request) {
 
 	// Get rootfs info
 	rootfs, err := s.db.GetRootFS(rootfsID)
-	if err != nil {
+	if err != nil || rootfs == nil {
 		s.jsonError(w, "RootFS not found", http.StatusNotFound)
 		return
 	}
