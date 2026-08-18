@@ -5354,24 +5354,42 @@ async function openNetworkDetails(id) {
 }
 
 async function loadNetworkVMs(id) {
-    const { ok, data } = await apiCall('/api/networks/' + id + '/vms');
     const tbody = document.getElementById('networkVMsList');
-    if (!ok || !data.vms || data.vms.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="4" class="empty-state">No VMs attached</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="4">Loading...</td></tr>';
+
+    try {
+        const { ok, data } = await apiCall('/api/networks/' + encodeURIComponent(id) + '/vms?_=' + Date.now());
+        if (!ok) {
+            const message = data && data.error ? data.error : 'Failed to load VMs';
+            tbody.innerHTML = '<tr><td colspan="4" style="color: var(--danger);">' + message + '</td></tr>';
+            networkVMs = [];
+            updateDestVMSelect();
+            return;
+        }
+
+        const vms = Array.isArray(data.vms) ? data.vms : [];
+        if (vms.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="4" class="empty-state">No VMs attached</td></tr>';
+            networkVMs = [];
+            updateDestVMSelect();
+            return;
+        }
+
+        networkVMs = vms;
+        tbody.innerHTML = vms.map(vm => ` + "`" + `
+            <tr>
+                <td>${vm.name}</td>
+                <td>${vm.ip_address || ''}</td>
+                <td>${vm.mac_address || ''}</td>
+                <td><span class="badge badge-${vm.status === 'running' ? 'success' : 'secondary'}">${vm.status}</span></td>
+            </tr>
+        ` + "`" + `).join('');
+        updateDestVMSelect();
+    } catch (err) {
+        tbody.innerHTML = '<tr><td colspan="4" style="color: var(--danger);">Failed to load VMs</td></tr>';
         networkVMs = [];
-        return;
+        updateDestVMSelect();
     }
-    networkVMs = data.vms;
-    tbody.innerHTML = data.vms.map(vm => ` + "`" + `
-        <tr>
-            <td>${vm.name}</td>
-            <td>${vm.ip_address}</td>
-            <td>${vm.mac_address}</td>
-            <td><span class="badge badge-${vm.status === 'running' ? 'success' : 'secondary'}">${vm.status}</span></td>
-        </tr>
-    ` + "`" + `).join('');
-    // Update dest VM select
-    updateDestVMSelect();
 }
 
 function updateDestVMSelect() {
@@ -5574,10 +5592,18 @@ async function saveBridgeSettings() {
 }
 
 function showNetworkTab(tab) {
-    document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
-    document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
-    document.querySelector('.tab-btn[onclick*="' + tab + '"]').classList.add('active');
-    document.getElementById('network' + tab.charAt(0).toUpperCase() + tab.slice(1) + 'Tab').classList.add('active');
+    const modal = document.getElementById('networkDetailsModal');
+    modal.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+    modal.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+
+    const button = modal.querySelector('.tab-btn[onclick*="' + tab + '"]');
+    const tabContent = document.getElementById('network' + tab.charAt(0).toUpperCase() + tab.slice(1) + 'Tab');
+    if (button) button.classList.add('active');
+    if (tabContent) tabContent.classList.add('active');
+
+    if (tab === 'vms' && currentNetworkId) {
+        loadNetworkVMs(currentNetworkId);
+    }
 }
 
 async function activateNetwork(id) {
