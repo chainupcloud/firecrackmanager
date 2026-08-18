@@ -1,10 +1,14 @@
 package api
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"firecrackmanager/internal/database"
 )
 
 func TestEnsureSSHRootPasswordLoginCreatesEarlyDropIn(t *testing.T) {
@@ -63,6 +67,51 @@ func TestEnsureSSHRootPasswordLoginCreatesEarlyDropIn(t *testing.T) {
 	}
 	if strings.Count(string(updatedMain), sshdDropInInclude) != 1 {
 		t.Fatalf("sshd_config include should remain idempotent: %s", string(updatedMain))
+	}
+}
+
+func TestHandleRootFSDeleteRemovesFileByStoredPath(t *testing.T) {
+	dir := t.TempDir()
+	db, err := database.New(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("database.New() error = %v", err)
+	}
+	defer db.Close()
+
+	rootfsPath := filepath.Join(dir, "actual-rootfs.ext4")
+	if err := os.WriteFile(rootfsPath, []byte("rootfs"), 0644); err != nil {
+		t.Fatalf("WriteFile(rootfs) error = %v", err)
+	}
+
+	rootfs := &database.RootFS{
+		ID:     "rootfs-test",
+		Name:   "display-name",
+		Path:   rootfsPath,
+		Size:   6,
+		Format: "ext4",
+	}
+	if err := db.CreateRootFS(rootfs); err != nil {
+		t.Fatalf("CreateRootFS() error = %v", err)
+	}
+
+	s := &Server{db: db, logger: func(string, ...interface{}) {}}
+	req := httptest.NewRequest(http.MethodDelete, "/api/rootfs/rootfs-test", nil)
+	rr := httptest.NewRecorder()
+
+	s.handleRootFS(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	if _, err := os.Stat(rootfsPath); !os.IsNotExist(err) {
+		t.Fatalf("rootfs file should be removed, stat error = %v", err)
+	}
+	got, err := db.GetRootFS(rootfs.ID)
+	if err != nil {
+		t.Fatalf("GetRootFS() error = %v", err)
+	}
+	if got != nil {
+		t.Fatalf("rootfs record should be deleted, got %#v", got)
 	}
 }
 

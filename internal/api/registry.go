@@ -846,8 +846,8 @@ func (s *Server) handleCreateDataDisk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.SizeGiB <= 0 || req.SizeGiB > 100 {
-		s.jsonError(w, "size_gib must be between 1 and 100", http.StatusBadRequest)
+	if req.SizeGiB <= 0 {
+		s.jsonError(w, "size_gib must be positive", http.StatusBadRequest)
 		return
 	}
 

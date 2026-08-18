@@ -3847,11 +3847,17 @@ func (s *Server) handleRootFS(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		s.kernelMgr.DeleteRootFS(rootfs.Name)
+		if err := os.Remove(rootfs.Path); err != nil && !os.IsNotExist(err) {
+			s.jsonError(w, "Failed to delete rootfs file: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 
 		if err := s.db.DeleteRootFS(rootfsID); err != nil {
 			s.jsonError(w, "Failed to delete rootfs", http.StatusInternalServerError)
 			return
+		}
+		if s.rootfsScanner != nil {
+			s.rootfsScanner.TriggerScan()
 		}
 		s.jsonResponse(w, map[string]string{"status": "success"})
 
