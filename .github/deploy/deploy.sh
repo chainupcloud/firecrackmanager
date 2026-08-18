@@ -118,12 +118,12 @@ systemctl is-active --quiet firecrackmanager
 
 # systemd active 只代表进程已启动，HTTP 端口可能还在初始化。
 for _ in {1..30}; do
-  if curl --fail --silent --max-time 2 "http://127.0.0.1:${APP_PORT}/" >/dev/null; then
+  if curl --fail --silent --max-time 2 "http://0.0.0.0:${APP_PORT}/" >/dev/null; then
     break
   fi
   sleep 2
 done
-curl --fail --silent --show-error --max-time 10 "http://127.0.0.1:${APP_PORT}/" >/dev/null
+curl --fail --silent --show-error --max-time 10 "http://0.0.0.0:${APP_PORT}/" >/dev/null
 systemctl --no-pager --full status firecrackmanager
 
 rm -rf "${REMOTE_TMP}"
