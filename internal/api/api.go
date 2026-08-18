@@ -5926,6 +5926,18 @@ func (s *Server) InitDefaultAdmin() error {
 	return nil
 }
 
+const (
+	sshdDropInInclude       = "Include /etc/ssh/sshd_config.d/*.conf"
+	sshdRootPasswordDropIn  = "00-firecrackmanager-root-password.conf"
+	sshdRootPasswordContent = `# Managed by FireCrackManager.
+PermitRootLogin yes
+PasswordAuthentication yes
+KbdInteractiveAuthentication yes
+ChallengeResponseAuthentication yes
+UsePAM yes
+`
+)
+
 // setRootPassword sets the root password in a rootfs image by mounting it and modifying /etc/shadow
 func setRootPassword(rootfsPath, password string) error {
 	// Create temporary mount point
@@ -5970,6 +5982,9 @@ func setRootPassword(rootfsPath, password string) error {
 			shadowContent := fmt.Sprintf("root:%s:19000:0:99999:7:::\n", passwordHash)
 			if err := os.WriteFile(shadowPath, []byte(shadowContent), 0640); err != nil {
 				return fmt.Errorf("failed to create shadow file: %v", err)
+			}
+			if err := ensureSSHRootPasswordLogin(mountPoint); err != nil {
+				return fmt.Errorf("failed to enable SSH password login: %v", err)
 			}
 			return nil
 		}
@@ -6020,6 +6035,69 @@ func setRootPassword(rootfsPath, password string) error {
 	newShadow := strings.Join(lines, "\n")
 	if err := os.WriteFile(shadowPath, []byte(newShadow), 0640); err != nil {
 		return fmt.Errorf("failed to write shadow file: %v", err)
+	}
+
+	if err := ensureSSHRootPasswordLogin(mountPoint); err != nil {
+		return fmt.Errorf("failed to enable SSH password login: %v", err)
+	}
+
+	return nil
+}
+
+func ensureSSHRootPasswordLogin(mountPoint string) error {
+	sshDir := filepath.Join(mountPoint, "etc", "ssh")
+	if _, err := os.Stat(sshDir); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to stat ssh config directory: %v", err)
+	}
+
+	dropInDir := filepath.Join(sshDir, "sshd_config.d")
+	if err := os.MkdirAll(dropInDir, 0755); err != nil {
+		return fmt.Errorf("failed to create sshd_config.d: %v", err)
+	}
+
+	// OpenSSH 对多数配置项采用先匹配生效，所以这里使用 00 前缀覆盖后续镜像自带 drop-in。
+	dropInPath := filepath.Join(dropInDir, sshdRootPasswordDropIn)
+	if err := os.WriteFile(dropInPath, []byte(sshdRootPasswordContent), 0644); err != nil {
+		return fmt.Errorf("failed to write sshd root password config: %v", err)
+	}
+
+	if err := ensureSSHDConfigIncludesDropInsFirst(filepath.Join(sshDir, "sshd_config")); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func ensureSSHDConfigIncludesDropInsFirst(sshdConfigPath string) error {
+	data, err := os.ReadFile(sshdConfigPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return os.WriteFile(sshdConfigPath, []byte(sshdDropInInclude+"\n"), 0644)
+		}
+		return fmt.Errorf("failed to read sshd_config: %v", err)
+	}
+
+	content := string(data)
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.EqualFold(trimmed, sshdDropInInclude) {
+			return nil
+		}
+		break
+	}
+
+	if !strings.HasSuffix(content, "\n") {
+		content += "\n"
+	}
+	newContent := sshdDropInInclude + "\n" + content
+	if err := os.WriteFile(sshdConfigPath, []byte(newContent), 0644); err != nil {
+		return fmt.Errorf("failed to update sshd_config include order: %v", err)
 	}
 
 	return nil
@@ -7451,31 +7529,10 @@ func (s *Server) installSSHInRootFS(rootfsPath, vmID string) error {
 		exec.Command("chroot", mountPoint, "ssh-keygen", "-A").Run()
 	}
 
-	// Ensure sshd_config allows password authentication
-	sshdConfig := filepath.Join(sshKeyDir, "sshd_config")
-	if data, err := os.ReadFile(sshdConfig); err == nil {
-		config := string(data)
-		modified := false
-
-		// Enable password authentication
-		if strings.Contains(config, "#PasswordAuthentication") {
-			config = strings.ReplaceAll(config, "#PasswordAuthentication no", "PasswordAuthentication yes")
-			config = strings.ReplaceAll(config, "#PasswordAuthentication yes", "PasswordAuthentication yes")
-			modified = true
-		}
-
-		// Enable root login (for initial access)
-		if strings.Contains(config, "#PermitRootLogin") {
-			config = strings.ReplaceAll(config, "#PermitRootLogin prohibit-password", "PermitRootLogin yes")
-			config = strings.ReplaceAll(config, "#PermitRootLogin yes", "PermitRootLogin yes")
-			modified = true
-		}
-
-		if modified {
-			os.WriteFile(sshdConfig, []byte(config), 0644)
-			s.db.AddVMLog(vmID, "info", "Updated sshd_config to allow password authentication")
-		}
+	if err := ensureSSHRootPasswordLogin(mountPoint); err != nil {
+		return err
 	}
+	s.db.AddVMLog(vmID, "info", "Updated sshd_config to allow root password authentication")
 
 	s.db.AddVMLog(vmID, "info", "OpenSSH server installation completed")
 	return nil
