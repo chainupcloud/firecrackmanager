@@ -1207,20 +1207,14 @@ func (s *Server) runDebianBuild(job *DebianBuildJob, builderDir, rootfsDir strin
 		os.RemoveAll(workDir)
 	}()
 
-	// Step 1: Check/Install debootstrap
+	// Step 1: 检查 debootstrap 依赖
 	updateJob(5, "checking_debootstrap", "Checking for debootstrap...")
 	if _, err := os.Stat("/usr/sbin/debootstrap"); os.IsNotExist(err) {
-		updateJob(5, "installing_debootstrap", "Installing debootstrap...")
-		cmd := exec.Command("apt-get", "update")
-		if output, err := cmd.CombinedOutput(); err != nil {
-			failJob(fmt.Errorf("apt-get update failed: %v: %s", err, string(output)))
-			return
-		}
-		cmd = exec.Command("apt-get", "install", "-y", "debootstrap")
-		if output, err := cmd.CombinedOutput(); err != nil {
-			failJob(fmt.Errorf("apt-get install debootstrap failed: %v: %s", err, string(output)))
-			return
-		}
+		failJob(fmt.Errorf("debootstrap is not installed on the host; install the debootstrap package and retry"))
+		return
+	} else if err != nil {
+		failJob(fmt.Errorf("failed to check debootstrap: %v", err))
+		return
 	}
 
 	// Step 2: Create working directories
