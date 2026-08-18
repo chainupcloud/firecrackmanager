@@ -1,0 +1,93 @@
+name: CI/CD
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION_FILE: go.mod
+  APP_BINARY: firecrackmanager
+  APP_DATA_DIR: /data/firecrackmanager
+  APP_PORT: "8080"
+  DEPLOY_HOST: 146.174.128.115
+  DEPLOY_USER: root
+  DEPLOY_SSH_PORT: "22"
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache: true
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc libc6-dev
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build linux amd64 binary
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build \
+            -trimpath \
+            -ldflags="-s -w" \
+            -o "dist/${APP_BINARY}" \
+            ./cmd/firecrackmanager
+          (cd dist && sha256sum "${APP_BINARY}" > "${APP_BINARY}.sha256")
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: firecrackmanager-linux-amd64
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+  deploy:
+    name: Deploy to hardware host
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    concurrency:
+      group: firecrackmanager-production
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: firecrackmanager-linux-amd64
+          path: dist
+
+      - name: Configure SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "${DEPLOY_SSH_KEY}"
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "${DEPLOY_SSH_KEY}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -p "${DEPLOY_SSH_PORT}" "${DEPLOY_HOST}" >> ~/.ssh/known_hosts
+
+      - name: Deploy
+        run: SSH_KEY_PATH="${HOME}/.ssh/deploy_key" .github/deploy/deploy.sh

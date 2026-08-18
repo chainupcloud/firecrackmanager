@@ -22,6 +22,7 @@ contracts/*/node_modules/
 
 # Environment (secrets)
 .env
+.env.hw
 .env.local
 .env.*.local
 # Deploy-time secret env sourced by service restart scripts (RELAYER_ADMIN_TOKEN
