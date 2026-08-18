@@ -1,6 +1,12 @@
 name: Bootstrap Host
 
 on:
+  push:
+    branches:
+      - master
+    paths:
+      - .github/workflows/bootstrap-host.yml
+      - .github/deploy/bootstrap-host.sh
   workflow_dispatch:
     inputs:
       firecracker_version:
