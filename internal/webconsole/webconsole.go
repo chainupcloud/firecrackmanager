@@ -6069,8 +6069,8 @@ func (wc *WebConsole) renderImagesPage() string {
                 </div>
                 <div class="form-group">
                     <label>Image Name</label>
-                    <input type="text" id="debianImageName" required placeholder="ubuntu-22.04-base" pattern="[a-zA-Z0-9_-]+">
-                    <small style="color: var(--text-secondary);">Only letters, numbers, dashes and underscores allowed</small>
+                    <input type="text" id="debianImageName" required placeholder="ubuntu-22.04-base" pattern="[a-zA-Z0-9_.-]+">
+                    <small style="color: var(--text-secondary);">Only letters, numbers, dashes, underscores and periods allowed</small>
                 </div>
                 <div class="form-group">
                     <label>Disk Size (MB)</label>
@@ -6952,8 +6952,8 @@ async function startDebianBuild() {
         return;
     }
 
-    if (!/^[a-zA-Z0-9_-]+$/.test(imageName)) {
-        alert('Image name can only contain letters, numbers, dashes, and underscores');
+    if (!/^[a-zA-Z0-9_.-]+$/.test(imageName) || !/[^.]/.test(imageName)) {
+        alert('Image name can only contain letters, numbers, dashes, underscores, and periods');
         return;
     }
 

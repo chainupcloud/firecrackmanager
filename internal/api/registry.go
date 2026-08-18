@@ -1054,12 +1054,21 @@ func (s *Server) handleBuildDebianImage(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Sanitize image name (only allow alphanumeric, dash, underscore)
+	// 校验镜像名，只允许安全的文件名字符
+	hasNameChar := false
 	for _, c := range req.ImageName {
-		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_') {
-			s.jsonError(w, "image_name can only contain alphanumeric characters, dashes, and underscores", http.StatusBadRequest)
+		validNameChar := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.'
+		if !validNameChar {
+			s.jsonError(w, "image_name can only contain alphanumeric characters, dashes, underscores, and periods", http.StatusBadRequest)
 			return
 		}
+		if c != '.' {
+			hasNameChar = true
+		}
+	}
+	if !hasNameChar {
+		s.jsonError(w, "image_name must include at least one non-period character", http.StatusBadRequest)
+		return
 	}
 
 	// 校验 Debian/Ubuntu 发行版代号
